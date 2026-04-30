@@ -47,16 +47,21 @@ report a problem: <a href="https://github.com/rfxn/copyfail/issues/new/choose">f
 </div>
 
 <p class="lede">
-Userspace defense-in-depth primitives for
-<strong>CVE-2026-31431 ("Copy Fail")</strong>: an AF_ALG / authencesn
-page-cache corruption local privilege-escalation primitive that leaves
-no on-disk artefacts. This package ships an LD_PRELOAD shim that blocks
-<code>AF_ALG</code> socket creation in every dynamic-linked process, and
-a comprehensive read-only auditor that scores the host across five
-attack-chain layers. The shim is one rung of a five-layer ladder
-(kernel patch &gt; modprobe blacklist &gt; systemd RestrictAddressFamilies
-&gt; <strong>LD_PRELOAD shim</strong> &gt; seccomp); the auditor reports on
-all five.
+Userspace defense against <strong>CVE-2026-31431 ("Copy Fail")</strong>
+- an AF_ALG / authencesn page-cache corruption local privilege-escalation
+primitive that leaves no on-disk artefacts. Ships an LD_PRELOAD shim
+that blocks <code>AF_ALG</code> socket creation in every dynamic-linked
+process, plus a comprehensive read-only host posture auditor.
+</p>
+<p class="lede">
+<strong>Designed to be a viable primary defense</strong> for the
+windows where the other rungs of the ladder cannot reach: the vendor
+kernel patch is not yet available (or you cannot reboot in that
+window), <code>modprobe</code> blacklist is a no-op because
+<code>algif_aead</code> is builtin (the RHEL default), or systemd
+<code>RestrictAddressFamilies</code> does not cover the threat surface
+(cron, login shells, container payloads). One .so + one
+<code>ld.so.preload</code> line, system-wide.
 </p>
 
 <h2>Add the repo (EL8 / EL9 / EL10)</h2>
@@ -229,24 +234,42 @@ rpm --import https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail
 rpm -K /path/to/afalg-defense-1.0.1-1.el9.x86_64.rpm
 # expect: digests signatures OK</pre>
 
-<h2>Defense-in-depth context</h2>
+<h2>Where this rung carries weight on its own</h2>
 <p>
-This package fills <strong>one rung</strong> of the ladder. Each rung
-above and below it is bypassable in different ways - which is why all
-five ship together. The auditor explicitly does not assume any single
-layer is sufficient.
+Every layer of defense for AF_ALG-class bugs has failure modes. The
+case for this package is that <strong>the conditions that defeat the
+rungs above it are not the same conditions that defeat the shim</strong>.
+That asymmetry is why the shim is a viable primary defense rather than
+just a backup.
 </p>
 <table>
-<tr><th>Layer</th><th>Where</th><th>Bypass</th></tr>
-<tr><td>Kernel patch</td><td>vendor</td><td>(none) - the only complete fix</td></tr>
-<tr><td>modprobe blacklist</td><td>kernel</td><td>resident-since-boot, statically built kernels</td></tr>
-<tr><td>systemd RestrictAddressFamilies</td><td>per-unit</td><td>processes started outside systemd</td></tr>
-<tr><td><strong>LD_PRELOAD shim (this package)</strong></td><td>userspace</td><td>static binaries; direct <code>syscall</code> instruction</td></tr>
-<tr><td>seccomp filter</td><td>per-unit</td><td>operationally heavier; deploy per-service</td></tr>
+<tr><th>Rung</th><th>Where it fails</th><th>What the shim does there</th></tr>
+<tr><td>1. Kernel patch (vendor)</td>
+    <td>EL7 EOL; EL8/9/10 rollout lags disclosure by days to weeks; can't always reboot in the hot window</td>
+    <td><strong>Closes the window without a reboot.</strong> Live install, no kernel touch</td></tr>
+<tr><td>2. <code>modprobe</code> blacklist</td>
+    <td>No-op when <code>algif_aead</code> is builtin (<strong>RHEL default</strong>); already-resident modules from boot</td>
+    <td><strong>Still effective</strong> - every userspace caller goes through libc <code>socket(2)</code></td></tr>
+<tr><td>3. systemd <code>RestrictAddressFamilies</code></td>
+    <td>Misses <strong>cron, sshd login shells, containers with their own pid 1</strong>, pre-restriction units</td>
+    <td><strong>Global</strong> - <code>/etc/ld.so.preload</code> applies to every dyn-linked process regardless of init</td></tr>
+<tr><td><strong>4. LD_PRELOAD shim (this package)</strong></td>
+    <td>Static binaries; direct <code>syscall</code> instruction; SUID strip</td>
+    <td>(see right column for coverage)</td></tr>
+<tr><td>5. seccomp filter</td>
+    <td>Per-unit; operationally heavy: explicit policy per service</td>
+    <td><strong>One .so, one preload line, whole host</strong></td></tr>
 </table>
 <p>
-Full writeup, including what each layer fails to catch and why, is in
-the
+Where the shim itself fails (static binaries, direct <code>syscall</code>
+instruction, SUID stripping) is <strong>attacker engineering
+territory</strong>. The other rungs fail under <strong>routine
+operator reality</strong> - vendors haven't shipped yet, the kernel
+was built with builtin crypto, the threat lives in a cron job. Deploy
+this rung first; layer the others as they become available.
+</p>
+<p>
+Full writeup is in the
 <a href="https://github.com/rfxn/copyfail/blob/main/README.md">README</a>.
 </p>
 
