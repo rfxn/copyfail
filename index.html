@@ -154,6 +154,13 @@ ships per-EL binary RPMs, an SRPM, the <code>.repo</code> file, and the
 public signing key as release assets. The same files are published in
 the dnf tree below.
 </p>
+<p>The <code>.repo</code> file (works on EL8/EL9/EL10):</p>
+<pre>sudo curl -sSL https://rfxn.github.io/copyfail/copyfail.repo \
+  -o /etc/yum.repos.d/copyfail.repo</pre>
+<p>And the public signing key (dnf imports this automatically on first install, but you can pre-import it):</p>
+<pre>sudo curl -sSL https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail \
+  | sudo rpm --import /dev/stdin</pre>
+
 <p>
 <strong>Per-EL binary RPMs are independently compiled against each
 distribution's glibc</strong> (EL8: 2.28 with split <code>libdl</code>;
