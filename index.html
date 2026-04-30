@@ -3,57 +3,97 @@
 <head>
 <meta charset="utf-8">
 <title>copyfail / afalg-defense - DNF repository</title>
+<meta name="description" content="Userspace AF_ALG defensive primitives for CVE-2026-31431 (Copy Fail). LD_PRELOAD shim and read-only host posture auditor, packaged for EL8/EL9/EL10.">
 <style>
- body{font-family:system-ui,sans-serif;max-width:48rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
+ body{font-family:system-ui,sans-serif;max-width:52rem;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#222}
  h1,h2{font-weight:600}
+ h1{font-size:1.6rem;margin-bottom:.2rem}
+ h2{font-size:1.25rem;margin-top:2rem;border-bottom:1px solid #eee;padding-bottom:.2rem}
+ h3{font-size:1rem;font-weight:600;margin-top:1.2rem}
  code,pre{background:#f4f4f4;padding:.1rem .3rem;border-radius:3px;font-size:.95em}
- pre{padding:.6rem .9rem;overflow-x:auto}
+ pre{padding:.6rem .9rem;overflow-x:auto;line-height:1.4}
  a{color:#0a4}
- table{border-collapse:collapse;width:100%}
- th,td{text-align:left;padding:.3rem .6rem;border-bottom:1px solid #ddd}
+ table{border-collapse:collapse;width:100%;margin:.6rem 0}
+ th,td{text-align:left;padding:.35rem .6rem;border-bottom:1px solid #ddd;font-size:.95em}
+ th{background:#fafafa;font-weight:600}
+ td.mono,td .mono{font-family:ui-monospace,SFMono-Regular,monospace;font-size:.85em}
+ td.sha{font-family:ui-monospace,SFMono-Regular,monospace;font-size:.78em;color:#666;word-break:break-all}
+ .badges{margin:.4rem 0 1rem}
+ .badge{display:inline-block;background:#0a4;color:#fff;padding:.15rem .5rem;border-radius:3px;font-size:.82em;margin-right:.4rem;text-decoration:none}
+ .badge.alt{background:#444}
+ .badge.cve{background:#a33}
+ .lede{font-size:1.05em;margin:.6rem 0 1.2rem}
  .note{background:#fffbe5;border-left:4px solid #d4a017;padding:.6rem .9rem;margin:1rem 0}
+ .ok{color:#0a4;font-weight:600}
+ .source-link{font-size:.9em;color:#666}
 </style>
 </head>
 <body>
 
 <h1>copyfail / afalg-defense</h1>
-<p>
-Userspace defensive primitives for CVE-2026-31431 ("Copy Fail") and the
-broader AF_ALG attack surface. LD_PRELOAD shim plus a comprehensive
-read-only host posture auditor. Source:
-<a href="https://github.com/rfxn/copyfail">github.com/rfxn/copyfail</a>.
+<div class="badges">
+  <a class="badge" href="https://github.com/rfxn/copyfail/releases/latest">Latest: v1.0.1</a>
+  <span class="badge alt">EL8 / EL9 / EL10</span>
+  <span class="badge alt">x86_64</span>
+  <a class="badge cve" href="https://nvd.nist.gov/vuln/detail/CVE-2026-31431">CVE-2026-31431</a>
+  <span class="badge alt">GPL v2</span>
+</div>
+<div class="source-link">
+source: <a href="https://github.com/rfxn/copyfail">github.com/rfxn/copyfail</a>
+&nbsp;|&nbsp;
+report a problem: <a href="https://github.com/rfxn/copyfail/issues/new/choose">file a GitHub issue</a>
+&nbsp;|&nbsp;
+<a href="https://github.com/rfxn/copyfail/releases">changelog</a>
+</div>
+
+<p class="lede">
+Userspace defense-in-depth primitives for
+<strong>CVE-2026-31431 ("Copy Fail")</strong>: an AF_ALG / authencesn
+page-cache corruption local privilege-escalation primitive that leaves
+no on-disk artefacts. This package ships an LD_PRELOAD shim that blocks
+<code>AF_ALG</code> socket creation in every dynamic-linked process, and
+a comprehensive read-only auditor that scores the host across five
+attack-chain layers. The shim is one rung of a five-layer ladder
+(kernel patch &gt; modprobe blacklist &gt; systemd RestrictAddressFamilies
+&gt; <strong>LD_PRELOAD shim</strong> &gt; seccomp); the auditor reports on
+all five.
 </p>
 
 <h2>Add the repo (EL8 / EL9 / EL10)</h2>
 <p>
-A single <code>copyfail.repo</code> file works for all three: it uses
-<code>$releasever</code> + <code>$basearch</code> substitution that dnf
-expands at fetch time.
+A single <code>copyfail.repo</code> file works for all three: dnf
+expands <code>$releasever</code> + <code>$basearch</code> per host, and
+<code>v1.0.1+</code> RPMs are GPG-signed (full <code>gpgcheck=1</code>
++ <code>repo_gpgcheck=1</code>).
 </p>
-<pre>curl -sSL https://rfxn.github.io/copyfail/copyfail.repo \
-  | sudo tee /etc/yum.repos.d/copyfail.repo
+<pre>sudo curl -sSL https://rfxn.github.io/copyfail/copyfail.repo \
+  -o /etc/yum.repos.d/copyfail.repo
 sudo dnf install -y afalg-defense</pre>
 
 <p>
-After install, the LD_PRELOAD shim is on disk but <strong>not yet
-active</strong>. Wiring <code>/etc/ld.so.preload</code> from a package
-post-install is too dangerous - one broken upgrade locks every
-dynamic-linked binary out of dlopen. Activation is an explicit
-operator action:
+After install the LD_PRELOAD shim is on disk but
+<strong>not yet active</strong>. Wiring <code>/etc/ld.so.preload</code>
+from a package post-install is too dangerous - one broken upgrade
+locks every dynamic-linked binary out of dlopen. Activation is an
+explicit operator action:
 </p>
 <pre>sudo /usr/sbin/copyfail-shim-enable    # smoke-tests, then writes /etc/ld.so.preload
 sudo /usr/sbin/copyfail-shim-disable   # reverses it</pre>
 
-<p>
-Verify the block is live:
-</p>
+<h3>Verify the block</h3>
 <pre>python3 -c 'import socket; socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)'
 # expect: PermissionError [Errno 1] Operation not permitted</pre>
+
+<h3>Removal</h3>
+<p>Always disable before uninstalling so RPM does not erase the .so out from under <code>/etc/ld.so.preload</code>:</p>
+<pre>sudo /usr/sbin/copyfail-shim-disable
+sudo dnf remove afalg-defense afalg-defense-shim afalg-defense-auditor</pre>
+<p>The package's <code>%preun</code> scriptlet also scrubs <code>/etc/ld.so.preload</code> on full erase as a safety net, but disabling first keeps the operation transparent.</p>
 
 <h2>Subpackages</h2>
 <table>
 <tr><th>Package</th><th>Arch</th><th>Contents</th></tr>
-<tr><td><code>afalg-defense</code></td><td>x86_64</td><td>Meta - pulls shim + auditor</td></tr>
+<tr><td><code>afalg-defense</code></td><td>x86_64</td><td>meta - pulls shim + auditor</td></tr>
 <tr><td><code>afalg-defense-shim</code></td><td>x86_64</td>
     <td><code>/usr/lib64/no-afalg.so</code> + <code>copyfail-shim-{enable,disable}</code> helpers</td></tr>
 <tr><td><code>afalg-defense-auditor</code></td><td>noarch</td>
@@ -65,23 +105,104 @@ trust an LD_PRELOAD on every dynamic-linked process:
 </p>
 <pre>sudo dnf install -y afalg-defense-auditor</pre>
 
+<h2>Auditor quick-start</h2>
+<p>
+The auditor is read-only. It writes only to <code>mkdtemp()</code> sentinel
+files, never modifies <code>/usr/bin</code> or <code>/etc</code>, and
+runs unprivileged (some checks degrade gracefully without root). Five
+categories: <code>ENV</code>, <code>KERNEL</code>, <code>MITIGATION</code>,
+<code>HARDENING</code>, <code>DETECTION</code>.
+</p>
+<pre>copyfail-local-check                       # human-readable, only flags non-OK
+copyfail-local-check --verbose             # show passing checks too
+copyfail-local-check --json                # SIEM-friendly: posture.verdict + per-check details
+copyfail-local-check --skip-trigger        # no live AF_ALG probe
+copyfail-local-check --skip-hardening      # skip suid/page-cache audit
+copyfail-local-check --emit-remediation    # print a bash script of suggested fixes</pre>
+
+<p>JSON output is structured for fleet ingest. The <code>posture.verdict</code> field is the headline; consume that, not the human report:</p>
+<pre>{
+  "schema_version": "1.1",
+  "tool": "copyfail_checker",
+  "cve": "CVE-2026-31431",
+  "checks": [ ...per-check details... ],
+  "posture": {
+    "verdict": "patched | vulnerable | vulnerable_kernel_userspace_mitigated |
+                kernel_likely_safe | inconclusive",
+    "layers": {
+      "kernel_patched":      "ok | missing | skipped | not_evaluated",
+      "af_alg_unreachable":  "...",
+      "modprobe_blacklist":  "...",
+      "ld_preload_shim":     "...",
+      "systemd_restriction": "...",
+      "user_service_dropin": "...",
+      "seccomp_runtime":     "...",
+      "auditd_running":      "...",
+      "audit_rule_af_alg":   "..."
+    }
+  },
+  "exit_code": 0
+}</pre>
+
+<p>Exit codes: <code>0</code> clean, <code>2</code> VULN (no userspace mitigation), <code>3</code> VULN-but-mitigated, <code>4</code> hardening recommendations only.</p>
+
 <h2>Direct downloads</h2>
 <p>
 Each release on
 <a href="https://github.com/rfxn/copyfail/releases/latest">github.com/rfxn/copyfail/releases</a>
-ships per-EL binary RPMs and an SRPM:
+ships per-EL binary RPMs, an SRPM, the <code>.repo</code> file, and the
+public signing key as release assets. The same files are published in
+the dnf tree below.
 </p>
+<p>
+<strong>Per-EL binary RPMs are independently compiled against each
+distribution's glibc</strong> (EL8: 2.28 with split <code>libdl</code>;
+EL9/EL10: 2.34+ with merged <code>libdl</code>) - do not cross-install
+across ELs.
+</p>
+
+<h3>EL8 (RHEL/Alma/Rocky/CentOS Stream 8)</h3>
 <table>
-<tr><th>EL</th><th>Repository tree</th></tr>
-<tr><td>8</td>  <td><a href="repo/8/x86_64/">/repo/8/x86_64/</a></td></tr>
-<tr><td>9</td>  <td><a href="repo/9/x86_64/">/repo/9/x86_64/</a></td></tr>
-<tr><td>10</td> <td><a href="repo/10/x86_64/">/repo/10/x86_64/</a></td></tr>
+<tr><th>File</th><th>sha256</th></tr>
+<tr><td><a href="repo/8/x86_64/afalg-defense-1.0.1-1.el8.x86_64.rpm">afalg-defense-1.0.1-1.el8.x86_64.rpm</a></td>
+    <td class="sha">3c1129956b52ca451eb928d304f9b4bd2e99eb70e8f52c03e486d1c843cbd652</td></tr>
+<tr><td><a href="repo/8/x86_64/afalg-defense-shim-1.0.1-1.el8.x86_64.rpm">afalg-defense-shim-1.0.1-1.el8.x86_64.rpm</a></td>
+    <td class="sha">c0613d5569536edeee9f172d8b370128c0eef0081032f0745695487a7a61015e</td></tr>
+<tr><td><a href="repo/8/x86_64/afalg-defense-auditor-1.0.1-1.el8.noarch.rpm">afalg-defense-auditor-1.0.1-1.el8.noarch.rpm</a></td>
+    <td class="sha">61e7ddefbfb0d5b03f012221cda4fdba3cf471f53c250825d7b43ea153810021</td></tr>
+<tr><td><a href="repo/8/x86_64/afalg-defense-1.0.1-1.el8.src.rpm">afalg-defense-1.0.1-1.el8.src.rpm</a></td>
+    <td class="sha">9a0aa3049508893ede159fd31a21480ccb9eb7cdede4c68bbe190a7f6721e7ad</td></tr>
+</table>
+
+<h3>EL9 (RHEL/Alma/Rocky/CentOS Stream 9)</h3>
+<table>
+<tr><th>File</th><th>sha256</th></tr>
+<tr><td><a href="repo/9/x86_64/afalg-defense-1.0.1-1.el9.x86_64.rpm">afalg-defense-1.0.1-1.el9.x86_64.rpm</a></td>
+    <td class="sha">381fc32223e22abc6db63bf72bd2403e66ed2fe59759c0b3afe0281c37db3eab</td></tr>
+<tr><td><a href="repo/9/x86_64/afalg-defense-shim-1.0.1-1.el9.x86_64.rpm">afalg-defense-shim-1.0.1-1.el9.x86_64.rpm</a></td>
+    <td class="sha">833f891a30f596872c393e979475cc9563d18f941ce58e038610f24bcd431fff</td></tr>
+<tr><td><a href="repo/9/x86_64/afalg-defense-auditor-1.0.1-1.el9.noarch.rpm">afalg-defense-auditor-1.0.1-1.el9.noarch.rpm</a></td>
+    <td class="sha">adf0addeddd188871fb98bbb761ac1b9bdfafc5a653cc33451f41f3dd0715181</td></tr>
+<tr><td><a href="repo/9/x86_64/afalg-defense-1.0.1-1.el9.src.rpm">afalg-defense-1.0.1-1.el9.src.rpm</a></td>
+    <td class="sha">0326696f9ee0aa7b9cb14f4ae8f2fa5774257906dc32ad7280cebd691fd8dbf7</td></tr>
+</table>
+
+<h3>EL10 (RHEL 10 / CentOS Stream 10 / AlmaLinux Kitten)</h3>
+<table>
+<tr><th>File</th><th>sha256</th></tr>
+<tr><td><a href="repo/10/x86_64/afalg-defense-1.0.1-1.el10.x86_64.rpm">afalg-defense-1.0.1-1.el10.x86_64.rpm</a></td>
+    <td class="sha">046ec488b1be69f161f52b52a65ccf5bba0eccde6895eb9ec6eceebd59242b31</td></tr>
+<tr><td><a href="repo/10/x86_64/afalg-defense-shim-1.0.1-1.el10.x86_64.rpm">afalg-defense-shim-1.0.1-1.el10.x86_64.rpm</a></td>
+    <td class="sha">86caff2df7633da369c6e5e35c2a431c46d29d05ee13b0691f07fc3461a480eb</td></tr>
+<tr><td><a href="repo/10/x86_64/afalg-defense-auditor-1.0.1-1.el10.noarch.rpm">afalg-defense-auditor-1.0.1-1.el10.noarch.rpm</a></td>
+    <td class="sha">2476ad91466e7716a0940d5b5080c416607bac6ea77a9e819f5b8563e3b7de30</td></tr>
+<tr><td><a href="repo/10/x86_64/afalg-defense-1.0.1-1.el10.src.rpm">afalg-defense-1.0.1-1.el10.src.rpm</a></td>
+    <td class="sha">fac98d3b442178ea13d3abd449e18ed83f2e3623cb6118bc5194e5fc4aa4997a</td></tr>
 </table>
 
 <h2>Signing</h2>
 <p>
-1.0.1 and later are signed by the <strong>Copyfail Project Signing
-Key</strong>:
+1.0.1 and later are signed by the <strong>Copyfail Project Signing Key</strong>:
 </p>
 <pre>fingerprint: 6001 1CDC EA2F F52D 975A  FDEE 6D30 F32C D5E8 0F80
 uid:         Copyfail Project Signing Key &lt;proj@rfxn.com&gt;
@@ -89,9 +210,9 @@ key file:    <a href="RPM-GPG-KEY-copyfail">/RPM-GPG-KEY-copyfail</a></pre>
 <p>
 The <code>copyfail.repo</code> sets both <code>gpgcheck=1</code>
 (verifies each RPM) and <code>repo_gpgcheck=1</code> (verifies
-<code>repomd.xml</code> via the detached
-<code>repomd.xml.asc</code> we publish alongside it). dnf imports the
-public key from <code>gpgkey=</code> on first use.
+<code>repomd.xml</code> via the detached <code>repomd.xml.asc</code>
+we publish alongside it). dnf imports the public key from
+<code>gpgkey=</code> on first use.
 </p>
 <p>Verify out-of-band:</p>
 <pre>curl -sSL https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail | gpg --import
@@ -103,13 +224,33 @@ rpm -K /path/to/afalg-defense-1.0.1-1.el9.x86_64.rpm
 
 <h2>Defense-in-depth context</h2>
 <p>
-The shim is one rung of a five-layer ladder (kernel patch &gt;
-modprobe blacklist &gt; systemd RestrictAddressFamilies &gt; LD_PRELOAD
-shim &gt; seccomp). The auditor scores all five against the running
-host. See the
-<a href="https://github.com/rfxn/copyfail/blob/main/README.md">README</a>
-for the full ladder, what each layer fails to catch, and why
-they ship together.
+This package fills <strong>one rung</strong> of the ladder. Each rung
+above and below it is bypassable in different ways - which is why all
+five ship together. The auditor explicitly does not assume any single
+layer is sufficient.
+</p>
+<table>
+<tr><th>Layer</th><th>Where</th><th>Bypass</th></tr>
+<tr><td>Kernel patch</td><td>vendor</td><td>(none) - the only complete fix</td></tr>
+<tr><td>modprobe blacklist</td><td>kernel</td><td>resident-since-boot, statically built kernels</td></tr>
+<tr><td>systemd RestrictAddressFamilies</td><td>per-unit</td><td>processes started outside systemd</td></tr>
+<tr><td><strong>LD_PRELOAD shim (this package)</strong></td><td>userspace</td><td>static binaries; direct <code>syscall</code> instruction</td></tr>
+<tr><td>seccomp filter</td><td>per-unit</td><td>operationally heavier; deploy per-service</td></tr>
+</table>
+<p>
+Full writeup, including what each layer fails to catch and why, is in
+the
+<a href="https://github.com/rfxn/copyfail/blob/main/README.md">README</a>.
+</p>
+
+<h2>Reporting issues</h2>
+<p>
+Bugs, packaging problems, false positives, missing distros - please
+<a href="https://github.com/rfxn/copyfail/issues/new/choose">file a
+GitHub issue</a>. Include the auditor's <code>--json</code> output if
+the report is about detection, and the output of
+<code>uname -a</code> + <code>cat /etc/os-release</code> for any
+runtime question.
 </p>
 
 <hr style="margin-top:2rem;border:none;border-top:1px solid #ddd">
