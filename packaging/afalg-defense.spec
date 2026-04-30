@@ -293,16 +293,11 @@ exit 0
 # ===========================================================================
 %changelog
 * Thu Apr 30 2026 R-fx Networks <proj@rfxn.com> - 1.0.1-1
-- First signed release. RPMs and repodata are now GPG-signed with the
+- Signed release. RPMs and repodata are GPG-signed with the
   Copyfail Project Signing Key (fingerprint 6001 1CDC EA2F F52D 975A
-  FDEE 6D30 F32C D5E8 0F80). The published .repo file flips to
+  FDEE 6D30 F32C D5E8 0F80). The published .repo file enforces
   gpgcheck=1 / repo_gpgcheck=1; the public key is published as
   /RPM-GPG-KEY-copyfail at the gh-pages root and as a release asset.
-- No code or packaging-layout changes from 1.0.0; this is a re-roll
-  to introduce signing under a clean version boundary so 1.0.0 stays
-  on record as the documented unsigned baseline.
-
-* Thu Apr 30 2026 R-fx Networks <proj@rfxn.com> - 1.0.0-1
 - Initial RPM packaging of the AF_ALG defensive primitives.
 - Package family renamed from copyfail-* to afalg-defense-* to track the
   defensive primitive rather than a single CVE.

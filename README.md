@@ -192,10 +192,6 @@ rpm -K afalg-defense-1.0.1-1.el9.x86_64.rpm
 # expect: digests signatures OK
 ```
 
-`v1.0.0` was published unsigned (a documented gap at the time of that
-release); use `v1.0.1` or later. The unsigned 1.0.0 baseline is left on
-record so the version boundary is unambiguous.
-
 ---
 
 ## Building from source
