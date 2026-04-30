@@ -101,12 +101,6 @@ rpm --import https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail
 rpm -K /path/to/afalg-defense-1.0.1-1.el9.x86_64.rpm
 # expect: digests signatures OK</pre>
 
-<div class="note">
-<strong>1.0.0 was unsigned.</strong> Use 1.0.1 or later. The 1.0.0
-release notes flagged the gap; 1.0.1 closes it under a clean version
-boundary so 1.0.0 stays on record as the documented unsigned baseline.
-</div>
-
 <h2>Defense-in-depth context</h2>
 <p>
 The shim is one rung of a five-layer ladder (kernel patch &gt;
