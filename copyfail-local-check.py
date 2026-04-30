@@ -1376,6 +1376,7 @@ def emit_remediation_script(results):
     lines = [
         "#!/bin/bash",
         "# Auto-generated remediation suggestions for CVE-2026-31431.",
+        "# R-fx Networks  -  github.com/rfxn/copyfail",
         "# Hostname: {}    Kernel: {}".format(
             os.uname().nodename, os.uname().release),
         "# Verdict:  {}".format(posture["verdict"]),
@@ -1482,6 +1483,8 @@ def main():
         out = {
             "schema_version": "1.1",
             "tool": "copyfail_checker",
+            "publisher": "R-fx Networks",
+            "url": "https://github.com/rfxn/copyfail",
             "cve": "CVE-2026-31431",
             "timestamp": int(time.time()),
             "hostname": os.uname().nodename,
@@ -1504,6 +1507,7 @@ def main():
         print(colorize("=" * 78, C.DIM))
         print(colorize("CVE-2026-31431 'Copy Fail' Checker  ", C.BOLD)
               + colorize("({})".format(os.uname().nodename), C.DIM))
+        print(colorize("R-fx Networks  -  github.com/rfxn/copyfail", C.DIM))
         print(colorize("=" * 78, C.DIM))
         for r in results:
             line = r.render(verbose=args.verbose)
