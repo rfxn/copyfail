@@ -162,12 +162,39 @@ Blocked attempts log to `auth.priv`:
 no-afalg[12345]: blocked AF_ALG (domain=38) via socket uid=0 euid=0 pid=12345
 ```
 
-### Note on signing
+### Verifying signatures
 
-The 1.0 release ships **unsigned** RPMs and the published `.repo`
-file sets `gpgcheck=0`. Hardened-policy environments should rebuild
-from the published SRPM under their own signing infrastructure, or
-verify by sha256 against the release-asset checksums.
+1.0.1 and later are signed by the **Copyfail Project Signing Key**.
+The `.repo` file enforces both `gpgcheck=1` (per-RPM signature) and
+`repo_gpgcheck=1` (detached `repomd.xml.asc` over the metadata), and
+dnf pulls the public key from `gpgkey=` on first use - so a stock
+`dnf install afalg-defense` on a fresh host does end-to-end signature
+verification automatically.
+
+```
+fingerprint: 6001 1CDC EA2F F52D 975A  FDEE 6D30 F32C D5E8 0F80
+uid:         Copyfail Project Signing Key <proj@rfxn.com>
+key file:    https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail
+```
+
+Verify a release asset out-of-band:
+
+```sh
+# Pin the public key
+curl -sSL https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail \
+  | sudo rpm --import /dev/stdin
+gpg --show-keys https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail \
+  | grep -E '^\s+[0-9A-F]{4}'
+# expect: 6001 1CDC EA2F F52D 975A  FDEE 6D30 F32C D5E8 0F80
+
+# Verify a downloaded RPM
+rpm -K afalg-defense-1.0.1-1.el9.x86_64.rpm
+# expect: digests signatures OK
+```
+
+`v1.0.0` was published unsigned (a documented gap at the time of that
+release); use `v1.0.1` or later. The unsigned 1.0.0 baseline is left on
+record so the version boundary is unambiguous.
 
 ---
 
