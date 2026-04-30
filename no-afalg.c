@@ -1,6 +1,6 @@
 /*
  * no-afalg.c
- *             (C) 2026, R-fx Networks <proj@rfxn.com>
+ *             (C) 2026, rfxn.com - forged in prod - <ryan@rfxn.com>
  * This program may be freely redistributed under the terms of the GNU GPL v2
  *
  * LD_PRELOAD shim blocking AF_ALG socket creation.
