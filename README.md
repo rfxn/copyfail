@@ -1,4 +1,4 @@
-# Copy Fail — Defense-in-Depth Primitives for CVE-2026-31431
+# Copy Fail - Defense-in-Depth Primitives for CVE-2026-31431
 
 Kernel-side audit probe and a userspace mitigation shim for the
 `AF_ALG` / `authencesn` page-cache corruption bug, a.k.a. **Copy
@@ -21,7 +21,7 @@ output length on decrypt, returning more bytes to userspace than were
 actually authenticated. When the destination of that decrypt is a pipe
 spliced from the page cache of a SUID binary or privileged config
 file, the kernel writes attacker-controlled bytes into clean
-page-cache pages — visible to every subsequent reader, including
+page-cache pages - visible to every subsequent reader, including
 `execve()` of `/usr/bin/su`. No file on disk is changed; the
 corruption lives in RAM until pages are evicted.
 
@@ -38,7 +38,7 @@ No single layer is enough. The reasons each layer can be defeated are
 the reasons all of them ship together:
 
 1. **Kernel patch (vendor).** The only complete fix. Not always
-   available — EL7 is out of maintenance, and EL8/9/10 patch rollout
+   available - EL7 is out of maintenance, and EL8/9/10 patch rollout
    lags disclosure by days to weeks. Until then:
 
 2. **`modprobe` blacklist of `algif_aead`, `authenc`, `authencesn`.**
@@ -54,7 +54,7 @@ the reasons all of them ship together:
 
 4. **`LD_PRELOAD` shim (this repo's `no-afalg.so`).** Defeats every
    dynamically-linked process that goes through libc's `socket(2)` /
-   `socketpair(2)` — which is essentially every distro binary. **It
+   `socketpair(2)` - which is essentially every distro binary. **It
    does not stop:** static binaries, processes that issue the syscall
    instruction directly (`syscall(SYS_socket, AF_ALG, …)` or inline
    asm), or processes that disable `LD_PRELOAD` (setuid binaries
@@ -90,7 +90,7 @@ Install system-wide (every dynamically-linked process inherits it):
 echo /usr/lib64/no-afalg.so > /etc/ld.so.preload
 ```
 
-Verify it took effect — quick one-liner:
+Verify it took effect - quick one-liner:
 
 ```sh
 python3 -c 'import socket; socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)'
@@ -146,9 +146,9 @@ Categories: `ENV`, `KERNEL`, `MITIGATION`, `HARDENING`, `DETECTION`.
 
 | Code | Meaning |
 |---|---|
-| 0 | Clean — no vulnerability, mitigations adequate |
+| 0 | Clean - no vulnerability, mitigations adequate |
 | 1 | Test framework error |
-| 2 | **VULNERABLE** — trigger or page-cache corruption confirmed, no mitigation |
+| 2 | **VULNERABLE** - trigger or page-cache corruption confirmed, no mitigation |
 | 3 | Vulnerable kernel but at least one userspace mitigation is active |
 | 4 | Hardening recommendations only (no active exploitability) |
 
@@ -159,7 +159,7 @@ not the human report.
 
 - Writes only to `mkdtemp()` sentinel files; never touches `/usr/bin`,
   `/etc`, or anything you care about.
-- All page-cache reads are passive — no file contents are modified.
+- All page-cache reads are passive - no file contents are modified.
 - The trigger probe targets a freshly-created sentinel, never a real
   SUID binary.
 - Runs unprivileged (some checks degrade gracefully without root).
@@ -172,10 +172,10 @@ The auditor is structured by attack-chain layer, not by checklist
 convenience. Each category answers a specific question about the
 current host.
 
-### `KERNEL` — is the primitive actually reachable?
+### `KERNEL` - is the primitive actually reachable?
 
 - **`AF_ALG` socket reachability.** Open `socket(AF_ALG, SOCK_SEQPACKET,
-  0)`. If `EAFNOSUPPORT`, the family is gone — done. If it succeeds,
+  0)`. If `EAFNOSUPPORT`, the family is gone - done. If it succeeds,
   the auto-load path works, which by itself is an exposure even
   without the rest of the cipher chain.
 - **`authencesn(hmac(sha256),cbc(aes))` cipher availability.** Bind
@@ -186,38 +186,38 @@ current host.
   refuse the cipher at bind() time but still allow the family.
 - **Live trigger probe.** Mirrors the public PoC against a sentinel
   file (never a SUID binary). This is the only check that produces a
-  *VULN* verdict on its own — kernel-version heuristics lie too often
+  *VULN* verdict on its own - kernel-version heuristics lie too often
   on backported distros.
 
-### `MITIGATION` — if the kernel is vulnerable, is anything stopping the bug?
+### `MITIGATION` - if the kernel is vulnerable, is anything stopping the bug?
 
 Each check below corresponds to one rung of the defense-in-depth
 ladder above and exists because the ladder above it is bypassable:
 
-- **`/etc/ld.so.preload` contains `no-afalg.so`** — verifies the shim
+- **`/etc/ld.so.preload` contains `no-afalg.so`** - verifies the shim
   is wired at the global linker level.
-- **Shim live-blocks `AF_ALG`** — actually calls `socket(AF_ALG)` from
+- **Shim live-blocks `AF_ALG`** - actually calls `socket(AF_ALG)` from
   a child shell and confirms `EPERM`. Catches stale, deleted, or
   ABI-broken shim binaries.
 - **`modprobe` blacklist for `algif_aead`, `authenc`, `authencesn`**
-  — drops the auto-load path. Cross-checks `/etc/modprobe.d/*.conf`
+  - drops the auto-load path. Cross-checks `/etc/modprobe.d/*.conf`
   against `/proc/modules` because a blacklist set after the modules
   loaded is a no-op.
-- **`/proc/modules` shows the modules absent** — independent of the
+- **`/proc/modules` shows the modules absent** - independent of the
   blacklist config; this is the runtime ground truth.
-- **systemd `RestrictAddressFamilies=` drops `AF_ALG`** — parsed from
+- **systemd `RestrictAddressFamilies=` drops `AF_ALG`** - parsed from
   the *effective* unit configuration, with explicit handling for the
   `~AF_ALG` (deny-list) and positive-list dialects, because both are
   in use across distros.
-- **Per-service drop-in freshness** — units that were loaded before
+- **Per-service drop-in freshness** - units that were loaded before
   the drop-in landed are still permissive. The check compares unit
   load time vs drop-in mtime and flags stale units that need
   `daemon-reload` + restart.
 - **seccomp filter active for the running PID** (when run as a
-  service wrapper) — catches the direct-syscall bypass at a
+  service wrapper) - catches the direct-syscall bypass at a
   per-process granularity.
 
-### `HARDENING` — if mitigation fails, what does the blast radius look like?
+### `HARDENING` - if mitigation fails, what does the blast radius look like?
 
 - **SUID binary inventory** with `find / -perm -4000`, recorded so
   that a future delta against this output is meaningful even after
@@ -227,22 +227,22 @@ ladder above and exists because the ladder above it is bypassable:
   `SUID_BINARIES` entry: hash the file via the page cache (`read`)
   and via direct I/O (`O_DIRECT`) and compare. Divergence = the bug
   is not just present, it has already been triggered.
-- **File capabilities** — `getcap -r` over `/usr/bin`, `/usr/sbin`,
+- **File capabilities** - `getcap -r` over `/usr/bin`, `/usr/sbin`,
   `/usr/local`, `/opt`. Files with `cap_setuid` etc. are
   hijack-equivalent to SUID and need the same audit.
 
-### `DETECTION` — would we know if someone tried this?
+### `DETECTION` - would we know if someone tried this?
 
-- **`auditd` running, with rules covering `socket(AF_ALG)`** — the
+- **`auditd` running, with rules covering `socket(AF_ALG)`** - the
   one syscall-level signature of the bug that survives userspace
   evasion. The check confirms both that auditd is up and that a
   rule actually targets `a0=38` (the `AF_ALG` constant).
-- **Recent IOC signals** — short window scan of `auth.priv` for
+- **Recent IOC signals** - short window scan of `auth.priv` for
   `no-afalg blocked` lines (forward-leaning IOC: a process *tried*
   to open `AF_ALG` and was stopped) and of audit log for matching
   `socket(38, …)` records.
 
-### `ENV` — does the script have what it needs to give a meaningful answer?
+### `ENV` - does the script have what it needs to give a meaningful answer?
 
 Architecture, kernel version, glibc version, Python version, root
 status. Surfaces "skip" reasons up front so an unhelpful run doesn't
@@ -257,14 +257,14 @@ look like a clean run.
   is tested only on x86_64. Patches welcome for arm64.
 - The userspace shim is irrelevant to static binaries and
   syscall-instruction issuers. This is a known design boundary, not
-  a bug — see "What the shim deliberately does NOT do" above.
+  a bug - see "What the shim deliberately does NOT do" above.
 - `modprobe` blacklists do not unload already-resident modules. If
   `/proc/modules` shows them present after a blacklist edit, you
   need a reboot or `rmmod`.
 - The trigger probe is destructive *only* against its own sentinel.
   It will not corrupt anything you would notice. It will, however,
   briefly load `algif_aead` and friends if they aren't already loaded
-  — which is the point.
+  - which is the point.
 
 ---
 

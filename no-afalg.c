@@ -7,7 +7,7 @@
  *
  * CVE-2026-31431 ("Copy Fail") userspace defense-in-depth.
  * Intercepts AF_ALG socket creation via libc. Does NOT prevent direct
- * syscall instruction bypass — pair with seccomp, modprobe blacklist
+ * syscall instruction bypass - pair with seccomp, modprobe blacklist
  * (where applicable), and kernel patching for complete coverage.
  *
  * Build:
@@ -79,7 +79,7 @@ int socket(int domain, int type, int protocol)
     }
     if (real_socket)
         return real_socket(domain, type, protocol);
-    /* dlsym failed at constructor time — fall through to direct
+    /* dlsym failed at constructor time - fall through to direct
      * syscall so legitimate sockets still work. */
     return (int)syscall(SYS_socket, (long)domain, (long)type, (long)protocol);
 }

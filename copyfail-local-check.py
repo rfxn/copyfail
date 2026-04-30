@@ -8,7 +8,7 @@
 ##
 #
 """
-copyfail_checker.py — comprehensive CVE-2026-31431 ("Copy Fail") auditor.
+copyfail_checker.py - comprehensive CVE-2026-31431 ("Copy Fail") auditor.
 
 Combines the kernel-level vulnerability probe (after rootsecdev/test_cve_2026_31431.py)
 with mitigation, hardening, and detection-readiness checks suitable for fleet
@@ -29,11 +29,11 @@ USAGE
   ./copyfail_checker.py --category KERNEL,MITIGATION
 
 EXIT CODES
-  0 — clean (no vulnerability, mitigations adequate)
-  1 — test framework error
-  2 — VULNERABLE (trigger or page-cache corruption confirmed, no mitigation)
-  3 — vulnerable kernel but at least one userspace mitigation active
-  4 — hardening recommendations only (no active exploitability)
+  0 - clean (no vulnerability, mitigations adequate)
+  1 - test framework error
+  2 - VULNERABLE (trigger or page-cache corruption confirmed, no mitigation)
+  3 - vulnerable kernel but at least one userspace mitigation active
+  4 - hardening recommendations only (no active exploitability)
 """
 
 import argparse
@@ -236,7 +236,7 @@ class Check:
 # --- Helpers ---------------------------------------------------------------
 
 def run_cmd(cmd, timeout=5):
-    """Run command, return (rc, stdout, stderr) — never raises.
+    """Run command, return (rc, stdout, stderr) - never raises.
     Uses explicit PIPE rather than capture_output for Python 3.6 compat (EL7)."""
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -271,7 +271,7 @@ def is_root():
 def _algif_aead_state():
     """Returns one of: 'builtin', 'loaded_module', 'absent'.
     'absent' means either not built at all, or built as a module that hasn't
-    been loaded yet — both cases mean the kernel could load it on AF_ALG
+    been loaded yet - both cases mean the kernel could load it on AF_ALG
     socket creation if it's a module."""
     if not os.path.exists("/sys/module/algif_aead"):
         return "absent"
@@ -326,7 +326,7 @@ def check_af_alg_socket():
             "AF_ALG socket family is reachable",
             remediation="Block via LD_PRELOAD shim, seccomp filter, "
                         "modprobe blacklist (effective when algif_aead is a "
-                        "loadable module — not when builtin), or "
+                        "loadable module - not when builtin), or "
                         "kernel.modules_disabled=1.",
         )
     except OSError as e:
@@ -375,7 +375,7 @@ def check_algif_aead_state():
     # builtin
     return Check(
         "algif_aead_state", "KERNEL", Status.WARN,
-        "algif_aead built into kernel (cannot be unloaded — common on RHEL "
+        "algif_aead built into kernel (cannot be unloaded - common on RHEL "
         "and other distros that compile crypto user-API in)",
         details={"state": "builtin"},
         remediation="No module-level mitigation possible on this kernel; use "
@@ -445,7 +445,7 @@ def trigger_probe():
                             if e.errno in (errno.EOPNOTSUPP, errno.ENOTSUP):
                                 return Check("trigger_probe", "KERNEL", Status.OK,
                                              "splice into AF_ALG unsupported on "
-                                             "this kernel — vector unreachable",
+                                             "this kernel - vector unreachable",
                                              details={"errno": e.errno})
                             return Check("trigger_probe", "KERNEL", Status.ERROR,
                                          "splice failed: {}".format(e.strerror))
@@ -475,7 +475,7 @@ def trigger_probe():
 
         if marker_off >= 0 and marker_orig < 0:
             return Check("trigger_probe", "KERNEL", Status.VULN,
-                         "VULNERABLE — marker landed at offset {} in sentinel "
+                         "VULNERABLE - marker landed at offset {} in sentinel "
                          "page cache; {} bytes corrupted".format(marker_off, diffs),
                          details={"marker_offset": marker_off,
                                   "bytes_changed": diffs},
@@ -483,7 +483,7 @@ def trigger_probe():
                                      "and reboot. Interim: LD_PRELOAD shim or seccomp.")
         if diffs > 0:
             return Check("trigger_probe", "KERNEL", Status.VULN,
-                         "VULNERABLE — page cache corrupted ({} bytes) but "
+                         "VULNERABLE - page cache corrupted ({} bytes) but "
                          "marker placement non-canonical".format(diffs),
                          details={"bytes_changed": diffs},
                          remediation="Apply kernel patch and reboot.")
@@ -539,7 +539,7 @@ def check_shim_blocks_af_alg():
                      "AF_ALG socket creation blocked at userspace layer (EPERM)")
     if out_s == "UNBLOCKED":
         return Check("shim_blocks_af_alg", "MITIGATION", Status.FAIL,
-                     "AF_ALG socket created successfully — no userspace block",
+                     "AF_ALG socket created successfully - no userspace block",
                      remediation="Verify shim loaded: ldd $(which python3) | grep no-afalg")
     return Check("shim_blocks_af_alg", "MITIGATION", Status.INFO,
                  "AF_ALG result: {}".format(out_s))
@@ -563,7 +563,7 @@ def check_modprobe_blacklist():
 
     # No blacklist found. Severity depends on whether the module is currently
     # loadable. Even on builtin kernels we still flag this as a defense-in-depth
-    # gap — costs nothing and protects against kernel rebuilds, kernel swaps,
+    # gap - costs nothing and protects against kernel rebuilds, kernel swaps,
     # or scenarios where someone replaces the running kernel with one that
     # builds algif_aead as a module.
     state = _algif_aead_state()
@@ -578,7 +578,7 @@ def check_modprobe_blacklist():
         return Check(
             "modprobe_blacklist", "MITIGATION", Status.WARN,
             "No AF_ALG modprobe blacklist; algif_aead is currently loaded "
-            "as a module (real exposure — can be reloaded after rmmod)",
+            "as a module (real exposure - can be reloaded after rmmod)",
             details={"algif_aead_state": state},
             remediation="Write to /etc/modprobe.d/99-no-afalg.conf:\n" +
                         blacklist_lines + "\nthen rmmod algif_aead.")
@@ -596,7 +596,7 @@ def check_modprobe_blacklist():
         "No AF_ALG modprobe blacklist; algif_aead is builtin (blacklist "
         "doesn't help current kernel but recommended as defense in depth)",
         details={"algif_aead_state": state},
-        remediation="Add anyway as defense in depth — costs nothing and "
+        remediation="Add anyway as defense in depth - costs nothing and "
                     "protects against kernel rebuilds/swaps. "
                     "/etc/modprobe.d/99-no-afalg.conf:\n" + blacklist_lines)
 
@@ -633,7 +633,7 @@ def check_systemd_restrict_address_families():
     """Sample common daemons for AF_ALG seccomp via systemd.
 
     Hosting daemons (sshd, web, mail, scheduler) and container/orchestration
-    runtimes are all candidates — any process that forks off code run by
+    runtimes are all candidates - any process that forks off code run by
     less-trusted principals benefits from the AF_ALG cut at the unit level."""
     if not os.path.exists("/run/systemd/system"):
         return Check("systemd_restrict", "MITIGATION", Status.SKIP,
@@ -699,7 +699,7 @@ def check_systemd_restrict_address_families():
                 len(findings_missing_arch)))
         return Check("systemd_restrict", "MITIGATION", Status.WARN,
                      "; ".join(msg_parts) +
-                     " — 32-bit compat syscalls may bypass filter",
+                     " - 32-bit compat syscalls may bypass filter",
                      details={"protected": findings_ok,
                               "needs_arch_directive": findings_missing_arch},
                      remediation="Add 'SystemCallArchitectures=native' alongside "
@@ -716,7 +716,7 @@ def check_systemd_restrict_address_families():
 def check_user_service_dropin():
     """user@.service is the systemd template that spawns per-user systemd
     instances. A RestrictAddressFamilies drop-in here propagates the seccomp
-    filter to every login session AND rootless podman/container — one of the
+    filter to every login session AND rootless podman/container - one of the
     highest-leverage mitigation points on a multi-user box."""
     if not os.path.exists("/run/systemd/system"):
         return Check("user_service_dropin", "MITIGATION", Status.SKIP,
@@ -731,7 +731,7 @@ def check_user_service_dropin():
                          "user@.service has AF_ALG restriction: {}".format(p),
                          details={"path": p})
     return Check("user_service_dropin", "MITIGATION", Status.WARN,
-                 "no user@.service drop-in restricting AF_ALG — high-leverage "
+                 "no user@.service drop-in restricting AF_ALG - high-leverage "
                  "mitigation point missing",
                  remediation="Create /etc/systemd/system/user@.service.d/no-afalg.conf:\n"
                              "[Service]\n"
@@ -743,7 +743,7 @@ def check_user_service_dropin():
 
 def check_seccomp_runtime():
     """Verify seccomp filter is actually loaded into running daemons by
-    reading /proc/PID/status — Seccomp=2 means filter mode active. Catches
+    reading /proc/PID/status - Seccomp=2 means filter mode active. Catches
     the case where a drop-in exists but the daemon was never restarted to
     pick it up."""
     if not os.path.exists("/run/systemd/system"):
@@ -788,13 +788,13 @@ def check_seccomp_runtime():
                      len(unfiltered)),
                  details={"unfiltered": unfiltered},
                  remediation="Daemons may have a drop-in file but never picked "
-                             "it up — restart the daemon (systemctl restart <svc>) "
+                             "it up - restart the daemon (systemctl restart <svc>) "
                              "or check that the drop-in actually contains the directive.")
 
 def check_dropin_freshness():
     """Detect stale daemons: drop-in file is newer than the running daemon's
     process start time. Means the file changed but the daemon was never
-    restarted to pick it up — filter isn't active despite the file existing."""
+    restarted to pick it up - filter isn't active despite the file existing."""
     if not os.path.exists("/run/systemd/system"):
         return Check("dropin_freshness", "MITIGATION", Status.SKIP,
                      "systemd not running")
@@ -865,7 +865,7 @@ def check_suid_binary(path):
                      details={"path": path, "mode": oct(mode & 0o7777)})
     if is_suid and other_x:
         return Check(name, "HARDENING", Status.WARN,
-                     "{} setuid + tenant-executable ({}) — substitution target".format(
+                     "{} setuid + tenant-executable ({}) - substitution target".format(
                          path, perms),
                      details={"path": path, "mode": oct(mode & 0o7777)},
                      remediation="If tenants don't need it: chmod 4750 root:wheel "
@@ -919,7 +919,7 @@ def check_page_cache_integrity():
                     path, cached[:16], direct[:16]),
                 details={"path": path, "cached_sha256": cached,
                          "disk_sha256": direct},
-                remediation="ACTIVE IOC — investigate. Evict cache: "
+                remediation="ACTIVE IOC - investigate. Evict cache: "
                             "vmtouch -e {} (then forensic image the host).".format(path)))
     return out
 
@@ -943,7 +943,7 @@ def check_file_capabilities():
         return Check("file_capabilities", "HARDENING", Status.WARN,
                      "{} binaries hold privilege-bearing file caps".format(len(risky)),
                      details={"entries": risky[:10]},
-                     remediation="Audit each — these are page-cache substitution "
+                     remediation="Audit each - these are page-cache substitution "
                                  "targets equivalent to suid root.")
     return Check("file_capabilities", "HARDENING", Status.OK,
                  "no privilege-bearing file capabilities found")
