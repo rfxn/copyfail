@@ -2,6 +2,8 @@
 
 # copyfail - CVE-2026-31431
 
+<a href="https://github.com/rfxn/copyfail"><img src="https://gh-card.dev/repos/rfxn/copyfail.svg" alt="rfxn/copyfail GitHub repo card"></a>
+
 **Local privilege escalation via the AF_ALG `authencesn` page-cache primitive.**
 The kernel mis-bounds an AEAD decrypt and writes attacker-controlled bytes
 into the page cache of any SUID binary or privileged config file.
