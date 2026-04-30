@@ -1,0 +1,33 @@
+# /etc/yum.repos.d/copyfail.repo
+#
+# DNF/YUM repository for the copyfail / afalg-defense packages.
+# Hosted on GitHub Pages; RPMs and repodata served directly by the
+# rfxn/copyfail repository.
+#
+# One repo definition works for EL8, EL9, and EL10: $releasever expands
+# to the major release number on RHEL/Alma/Rocky/CentOS Stream, which is
+# the same key the published repo tree is indexed by.
+#
+# Install:
+#   curl -sSL https://rfxn.github.io/copyfail/copyfail.repo \
+#     | sudo tee /etc/yum.repos.d/copyfail.repo
+#   sudo dnf install -y afalg-defense
+#
+# After install, activate the LD_PRELOAD shim explicitly:
+#   sudo /usr/sbin/copyfail-shim-enable
+#
+# gpgcheck is disabled in this 1.0 release - the published RPMs are not
+# yet signed. Pin the package by version + sha256 if your environment
+# requires authenticated downloads, or rebuild from the published SRPM
+# under your own signing infrastructure.
+
+[copyfail]
+name=copyfail / afalg-defense (EL$releasever)
+baseurl=https://rfxn.github.io/copyfail/repo/$releasever/$basearch/
+enabled=1
+gpgcheck=0
+repo_gpgcheck=0
+metadata_expire=1h
+# skip_if_unavailable lets dnf operations on unrelated packages succeed
+# even if rfxn.github.io is briefly unreachable.
+skip_if_unavailable=1

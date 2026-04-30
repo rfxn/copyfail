@@ -73,7 +73,105 @@ does **not** assume that any single layer is sufficient.
 
 ---
 
-## Building and installing the LD_PRELOAD shim
+## Pre-built RPMs (EL8 / EL9 / EL10)
+
+Both halves ship as RPMs from each release. The package family is
+`afalg-defense` (named for the defensive primitive, not the bug nickname,
+so it survives any future AF_ALG family CVE). Three subpackages are
+published per EL:
+
+| Package | Arch | Contents |
+|---|---|---|
+| `afalg-defense` | `x86_64` | meta - pulls shim + auditor |
+| `afalg-defense-shim` | `x86_64` | `/usr/lib64/no-afalg.so` + `copyfail-shim-{enable,disable}` helpers |
+| `afalg-defense-auditor` | `noarch` | `/usr/sbin/copyfail-local-check` (Python, stdlib-only, read-only) |
+
+### Option 1 - DNF repository (recommended)
+
+A single `.repo` file works for all three ELs - dnf expands
+`$releasever` / `$basearch` per host:
+
+```sh
+sudo curl -sSL https://rfxn.github.io/copyfail/copyfail.repo \
+  -o /etc/yum.repos.d/copyfail.repo
+sudo dnf install -y afalg-defense
+```
+
+Both `afalg-defense-shim` and `afalg-defense-auditor` install in the
+same transaction. To install only the read-only auditor (no
+LD_PRELOAD on hot infrastructure):
+
+```sh
+sudo dnf install -y afalg-defense-auditor
+```
+
+### Option 2 - direct RPM download
+
+Each release on
+[github.com/rfxn/copyfail/releases](https://github.com/rfxn/copyfail/releases/latest)
+ships per-EL binary RPMs and an SRPM as release assets. Filename pattern:
+
+```
+afalg-defense-VERSION-RELEASE.elN.x86_64.rpm           (meta)
+afalg-defense-shim-VERSION-RELEASE.elN.x86_64.rpm      (LD_PRELOAD)
+afalg-defense-auditor-VERSION-RELEASE.elN.noarch.rpm   (auditor)
+afalg-defense-VERSION-RELEASE.elN.src.rpm              (SRPM, rebuildable)
+```
+
+Per-EL binary RPMs are **independently compiled** against each
+distribution's glibc (EL8: glibc 2.28 with split libdl; EL9/EL10:
+glibc 2.34+ with merged libdl) - the symbol-version dependencies are
+correct for each distribution's loader. Do not cross-install across
+ELs.
+
+```sh
+# Example for EL9
+sudo dnf install -y https://github.com/rfxn/copyfail/releases/download/v1.0.0/afalg-defense-1.0.0-1.el9.x86_64.rpm \
+                    https://github.com/rfxn/copyfail/releases/download/v1.0.0/afalg-defense-shim-1.0.0-1.el9.x86_64.rpm \
+                    https://github.com/rfxn/copyfail/releases/download/v1.0.0/afalg-defense-auditor-1.0.0-1.el9.noarch.rpm
+```
+
+### Activating after install
+
+The RPM **does not** automatically wire the shim into
+`/etc/ld.so.preload`. A bad `.so` referenced there bricks every
+dynamic-linked process - we deliberately leave activation to a
+deliberate operator action so an upgrade, mirror corruption, or
+package-manager partial transaction cannot lock you out:
+
+```sh
+sudo /usr/sbin/copyfail-shim-enable     # smoke-tests, then writes /etc/ld.so.preload
+sudo /usr/sbin/copyfail-shim-disable    # reverses it
+```
+
+The enable helper does `LD_PRELOAD=/usr/lib64/no-afalg.so /bin/true`
+before touching `/etc/ld.so.preload` - if the .so cannot be loaded
+for any reason, the helper refuses to update the file rather than
+brick the host.
+
+### Verifying the block
+
+```sh
+python3 -c 'import socket; socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)'
+# expect: PermissionError [Errno 1] Operation not permitted
+```
+
+Blocked attempts log to `auth.priv`:
+
+```
+no-afalg[12345]: blocked AF_ALG (domain=38) via socket uid=0 euid=0 pid=12345
+```
+
+### Note on signing
+
+The 1.0 release ships **unsigned** RPMs and the published `.repo`
+file sets `gpgcheck=0`. Hardened-policy environments should rebuild
+from the published SRPM under their own signing infrastructure, or
+verify by sha256 against the release-asset checksums.
+
+---
+
+## Building from source
 
 `no-afalg.c` is single-file, no build system. Tested on EL7 (gcc 4.8 /
 glibc 2.17), EL8 (gcc 8.5 / glibc 2.28), EL9 (gcc 11.5 / glibc 2.34),

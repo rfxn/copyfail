@@ -1,0 +1,81 @@
+#!/bin/bash
+#
+# copyfail-shim-enable
+#   Idempotently wire /usr/lib64/no-afalg.so into /etc/ld.so.preload.
+#
+# Safety: ld.so.preload is a foot-cannon. A broken/wrong-arch .so referenced
+# here makes every dynamically-linked binary fail to start - including the
+# login shell. We therefore:
+#   1. Verify the .so is present.
+#   2. Smoke-test it against /bin/true with LD_PRELOAD - if /bin/true returns
+#      0, every other dynamic binary on this host can also load the shim.
+#   3. Only then atomically update /etc/ld.so.preload via rename(2).
+#
+# Exit codes: 0 = enabled (or already enabled), non-zero = refused to touch
+# the system because something looked unsafe.
+
+set -eu
+
+SHIM=/usr/lib64/no-afalg.so
+PRELOAD=/etc/ld.so.preload
+
+err()  { printf 'copyfail-shim-enable: %s\n'  "$*" >&2; }
+info() { printf 'copyfail-shim-enable: %s\n'  "$*"; }
+
+if [ "$(id -u)" -ne 0 ]; then
+    err "must run as root"
+    exit 2
+fi
+
+if [ ! -f "$SHIM" ]; then
+    err "$SHIM not present - reinstall copyfail-shim package"
+    exit 3
+fi
+
+# Pre-flight: confirm the shim itself can be loaded and does not break libc.
+# Using /bin/true means we are not depending on python or anything optional.
+if ! LD_PRELOAD="$SHIM" /bin/true 2>/dev/null; then
+    err "$SHIM failed pre-flight LD_PRELOAD smoke-test on /bin/true"
+    err "REFUSING to add it to $PRELOAD - would break dynamic-linked binaries"
+    exit 4
+fi
+
+# Already there?
+if [ -f "$PRELOAD" ] && grep -Fxq "$SHIM" "$PRELOAD"; then
+    info "already enabled in $PRELOAD"
+    exit 0
+fi
+
+# Atomic update: write the new contents to a sibling tempfile in the same
+# directory, then rename(2) over the target. Avoids a torn read window where
+# another process opens an empty/half-written /etc/ld.so.preload.
+tmp=$(mktemp /etc/ld.so.preload.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+
+if [ -f "$PRELOAD" ]; then
+    cat "$PRELOAD" > "$tmp"
+    # Ensure trailing newline before appending.
+    [ -s "$tmp" ] && [ "$(tail -c1 "$tmp" | od -An -c | tr -d ' ')" != "\\n" ] \
+        && printf '\n' >> "$tmp"
+fi
+printf '%s\n' "$SHIM" >> "$tmp"
+
+chmod 0644 "$tmp"
+mv -f "$tmp" "$PRELOAD"
+trap - EXIT
+
+# Post-check: re-run smoke test on a real dynamic binary now that the
+# preload file is live. If this fails, /etc/ld.so.preload is still broken
+# but the process executing /bin/true here will already have failed.
+if ! /bin/true 2>/dev/null; then
+    err "post-install smoke-test failed - rolling back"
+    if [ -f "$PRELOAD" ]; then
+        sed -i "\\|^${SHIM}\$|d" "$PRELOAD"
+    fi
+    exit 5
+fi
+
+info "enabled: $SHIM is now in $PRELOAD"
+info "verify: python3 -c 'import socket; socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)'"
+info "         expect: PermissionError [Errno 1] Operation not permitted"
+exit 0

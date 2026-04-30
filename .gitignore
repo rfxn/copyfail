@@ -1,3 +1,12 @@
 __pycache__/
 *.pyc
 no-afalg.so
+
+# Build artifacts - rebuildable from packaging/ + source
+rpmbuild/
+*.rpm
+*.src.rpm
+
+# Editor / OS
+*.swp
+.DS_Store
