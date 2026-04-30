@@ -2,8 +2,6 @@
 
 # copyfail - CVE-2026-31431
 
-<a href="https://github.com/rfxn/copyfail"><img src="https://gh-card.dev/repos/rfxn/copyfail.svg" alt="rfxn/copyfail GitHub repo card"></a>
-
 **Local privilege escalation via the AF_ALG `authencesn` page-cache primitive.**
 The kernel mis-bounds an AEAD decrypt and writes attacker-controlled bytes
 into the page cache of any SUID binary or privileged config file.
@@ -14,7 +12,7 @@ Userspace defense-in-depth: an `LD_PRELOAD` shim that blocks `AF_ALG`
 socket creation and a read-only host posture auditor.
 Signed RPMs for EL8 / EL9 / EL10.
 
-<a href="https://rfxn.github.io/copyfail/"><img src="https://img.shields.io/badge/%F0%9F%93%96%20project%20page-rfxn.github.io%2Fcopyfail-22d3ee?style=for-the-badge&labelColor=09090b" alt="copyfail project page"></a>
+<a href="https://rfxn.github.io/copyfail/"><img src="https://img.shields.io/badge/%F0%9F%93%A6%20yum%2Fdnf%20repo-rfxn.github.io%2Fcopyfail-22d3ee?style=for-the-badge&labelColor=09090b" alt="copyfail yum/dnf package repo"></a>
 <a href="https://www.rfxn.com/research/copyfail-cve-2026-31431"><img src="https://img.shields.io/badge/%F0%9F%94%AC%20deep%20dive-rfxn.com%2Fresearch-d97757?style=for-the-badge&labelColor=09090b" alt="Deep-dive research article on rfxn.com"></a>
 
 [![CVE](https://img.shields.io/badge/CVE-2026--31431-d97757?labelColor=09090b)](#what-this-protects-against)
