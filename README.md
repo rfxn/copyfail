@@ -1,15 +1,36 @@
-# copyfail / afalg-defense
+<div align="center">
 
-Userspace defense-in-depth primitives against **CVE-2026-31431
-("Copy Fail")** — the AF_ALG / `authencesn` page-cache corruption
-local privilege-escalation primitive. Ships an `LD_PRELOAD` shim that
-blocks `AF_ALG` socket creation and a comprehensive read-only host
-posture auditor, packaged as **signed RPMs for EL8 / EL9 / EL10**.
+# copyfail - CVE-2026-31431
 
-> **Project page (install instructions, downloads, signing key):
-> [rfxn.github.io/copyfail](https://rfxn.github.io/copyfail/)**
-> &nbsp;|&nbsp; [Latest release](https://github.com/rfxn/copyfail/releases/latest)
-> &nbsp;|&nbsp; [File an issue](https://github.com/rfxn/copyfail/issues/new/choose)
+**Local privilege escalation via the AF_ALG `authencesn` page-cache primitive.**
+The kernel mis-bounds an AEAD decrypt and writes attacker-controlled bytes
+into the page cache of any SUID binary or privileged config file.
+No file on disk changes; the corruption lives in RAM until eviction.
+No on-disk forensic artefacts.
+
+Userspace defense-in-depth: an `LD_PRELOAD` shim that blocks `AF_ALG`
+socket creation and a read-only host posture auditor.
+Signed RPMs for EL8 / EL9 / EL10.
+
+<a href="https://rfxn.github.io/copyfail/"><img src="https://img.shields.io/badge/%F0%9F%93%96%20project%20page-rfxn.github.io%2Fcopyfail-22d3ee?style=for-the-badge&labelColor=09090b" alt="copyfail project page"></a>
+
+[![CVE](https://img.shields.io/badge/CVE-2026--31431-d97757?labelColor=09090b)](#what-this-protects-against)
+[![Severity](https://img.shields.io/badge/severity-LOCAL%20PRIVESC-d44d4d?labelColor=09090b)](#what-this-protects-against)
+[![License](https://img.shields.io/badge/license-GPL--2.0-22d3ee?labelColor=09090b)](LICENSE)
+[![EL8/9/10](https://img.shields.io/badge/EL-8%20%2F%209%20%2F%2010-4ade80?labelColor=09090b)](https://rfxn.github.io/copyfail/)
+[![Latest release](https://img.shields.io/github/v/release/rfxn/copyfail?label=release&color=22d3ee&labelColor=09090b)](https://github.com/rfxn/copyfail/releases/latest)
+
+[Install](#install) · [Audit](#audit-the-host) · [Defense-in-depth](#defense-in-depth-where-this-rung-carries-weight-on-its-own) · [Subpackages](#subpackages) · [Verify signatures](#verifying-signatures)
+
+</div>
+
+---
+
+> [!NOTE]
+> The shim is installed but **not auto-enabled** - activation is an explicit
+> operator step (`copyfail-shim-enable`) so a broken upgrade can't brick a
+> host. The auditor is read-only by design: writes only to `mkdtemp()`
+> sentinels, never modifies `/usr/bin` or `/etc`.
 
 ---
 
