@@ -15,6 +15,7 @@ socket creation and a read-only host posture auditor.
 Signed RPMs for EL8 / EL9 / EL10.
 
 <a href="https://rfxn.github.io/copyfail/"><img src="https://img.shields.io/badge/%F0%9F%93%96%20project%20page-rfxn.github.io%2Fcopyfail-22d3ee?style=for-the-badge&labelColor=09090b" alt="copyfail project page"></a>
+<a href="https://www.rfxn.com/research/copyfail-cve-2026-31431"><img src="https://img.shields.io/badge/%F0%9F%94%AC%20deep%20dive-rfxn.com%2Fresearch-d97757?style=for-the-badge&labelColor=09090b" alt="Deep-dive research article on rfxn.com"></a>
 
 [![CVE](https://img.shields.io/badge/CVE-2026--31431-d97757?labelColor=09090b)](#what-this-protects-against)
 [![Severity](https://img.shields.io/badge/severity-LOCAL%20PRIVESC-d44d4d?labelColor=09090b)](#what-this-protects-against)
@@ -115,6 +116,11 @@ net, but disabling first keeps the operation transparent.
 ---
 
 ## What this protects against
+
+> 🔬 **Full writeup:** [Copy Fail (CVE-2026-31431) — rfxn.com/research](https://www.rfxn.com/research/copyfail-cve-2026-31431)
+> covers the kernel-level mechanics, exploit primitives, and why the
+> userspace shim closes the practical attacker windows. Brief
+> summary below.
 
 `AF_ALG`'s `authencesn(hmac(sha256),cbc(aes))` AEAD path miscomputes
 output length on decrypt, returning more bytes to userspace than were
