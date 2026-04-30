@@ -56,7 +56,7 @@ the reasons all of them ship together:
    dynamically-linked process that goes through libc's `socket(2)` /
    `socketpair(2)` - which is essentially every distro binary. **It
    does not stop:** static binaries, processes that issue the syscall
-   instruction directly (`syscall(SYS_socket, AF_ALG, …)` or inline
+   instruction directly (`syscall(SYS_socket, AF_ALG, ...)` or inline
    asm), or processes that disable `LD_PRELOAD` (setuid binaries
    strip it; the kernel patch is the answer there, not a userspace
    shim).
@@ -122,7 +122,7 @@ rm /etc/ld.so.preload   # or: edit out the line if other shims share the file
 
 It does not wrap `syscall(2)`. Reading six `long` varargs
 unconditionally is undefined behaviour, and the bypasses it would
-catch (`syscall(SYS_socket, AF_ALG, …)` and inline-asm `syscall`
+catch (`syscall(SYS_socket, AF_ALG, ...)` and inline-asm `syscall`
 instruction) are unblockable from userspace anyway. Pair with seccomp
 or the kernel patch for that surface.
 
@@ -138,6 +138,7 @@ or the kernel patch for that surface.
 ./copyfail-local-check.py --skip-hardening   # skip suid/page-cache audit
 ./copyfail-local-check.py --category KERNEL,MITIGATION
 ./copyfail-local-check.py --no-progress      # suppress stderr progress line
+./copyfail-local-check.py --emit-remediation # bash script of fixes (review first)
 ```
 
 Categories: `ENV`, `KERNEL`, `MITIGATION`, `HARDENING`, `DETECTION`.
@@ -148,12 +149,52 @@ Categories: `ENV`, `KERNEL`, `MITIGATION`, `HARDENING`, `DETECTION`.
 |---|---|
 | 0 | Clean - no vulnerability, mitigations adequate |
 | 1 | Test framework error |
-| 2 | **VULNERABLE** - trigger or page-cache corruption confirmed, no mitigation |
+| 2 | **VULNERABLE** - trigger probe confirmed exploitable, no userspace mitigation |
 | 3 | Vulnerable kernel but at least one userspace mitigation is active |
-| 4 | Hardening recommendations only (no active exploitability) |
+| 4 | Mitigation/hardening gaps (not actively exploitable as observed) |
 
-Designed for fleet rollout: parse `--json` exit + `summary.vuln`,
-not the human report.
+Only `trigger_probe` produces a definitive `VULN` verdict. Page-cache
+divergence is reported as `WARN` (potential IOC requiring human
+investigation), not `VULN` - it can have benign causes too.
+
+### JSON output
+
+`--json` emits a structured object on stdout containing every check, a
+counts summary, the exit code, and a top-level `posture` block that
+SIEMs/dashboards can ingest directly:
+
+```json
+{
+  "posture": {
+    "verdict": "vulnerable_kernel_userspace_mitigated",
+    "layers": {
+      "kernel_patched":      "missing",
+      "af_alg_unreachable":  "missing",
+      "modprobe_blacklist":  "missing",
+      "ld_preload_shim":     "ok",
+      "systemd_restriction": "missing",
+      "user_service_dropin": "missing",
+      "seccomp_runtime":     "skipped",
+      "auditd_running":      "ok",
+      "audit_rule_af_alg":   "ok"
+    }
+  }
+}
+```
+
+`verdict` is one of: `patched`, `kernel_likely_safe`, `inconclusive`,
+`vulnerable_kernel_userspace_mitigated`, `vulnerable`. Designed so a
+fleet console can render a per-host posture row without re-implementing
+verdict logic over the raw checks.
+
+### Remediation output
+
+`--emit-remediation` prints a bash script aggregating the per-check
+remediation hints and a canonical-commands appendix. Output is
+**fully commented** by default; uncomment what you actually want to
+apply. Several remediations (chmod on suid binaries, modules_disabled
+sysctl, modprobe blacklist) are policy-dependent or require a reboot
+to undo - review every block before pasting.
 
 ### Safety guarantees
 
@@ -240,7 +281,7 @@ ladder above and exists because the ladder above it is bypassable:
 - **Recent IOC signals** - short window scan of `auth.priv` for
   `no-afalg blocked` lines (forward-leaning IOC: a process *tried*
   to open `AF_ALG` and was stopped) and of audit log for matching
-  `socket(38, …)` records.
+  `socket(38, ...)` records.
 
 ### `ENV` - does the script have what it needs to give a meaningful answer?
 

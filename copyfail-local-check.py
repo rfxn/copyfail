@@ -21,19 +21,20 @@ SAFE BY DESIGN
   - Trigger probe targets a freshly-created sentinel, not /usr/bin/su.
 
 USAGE
-  ./copyfail_checker.py                       # human-readable
-  ./copyfail_checker.py --json                # SIEM ingestion
-  ./copyfail_checker.py --verbose             # show passing checks
-  ./copyfail_checker.py --skip-trigger        # skip AF_ALG probe
-  ./copyfail_checker.py --skip-hardening      # skip suid/page-cache audit
-  ./copyfail_checker.py --category KERNEL,MITIGATION
+  ./copyfail-local-check.py                       # human-readable
+  ./copyfail-local-check.py --json                # SIEM ingestion (+ posture)
+  ./copyfail-local-check.py --verbose             # show passing checks
+  ./copyfail-local-check.py --skip-trigger        # skip AF_ALG probe
+  ./copyfail-local-check.py --skip-hardening      # skip suid/page-cache audit
+  ./copyfail-local-check.py --category KERNEL,MITIGATION
+  ./copyfail-local-check.py --emit-remediation    # bash-script of fixes
 
 EXIT CODES
   0 - clean (no vulnerability, mitigations adequate)
   1 - test framework error
-  2 - VULNERABLE (trigger or page-cache corruption confirmed, no mitigation)
+  2 - VULNERABLE (trigger probe confirmed, no userspace mitigation)
   3 - vulnerable kernel but at least one userspace mitigation active
-  4 - hardening recommendations only (no active exploitability)
+  4 - mitigation/hardening gaps (not actively exploitable as observed)
 """
 
 import argparse
@@ -118,17 +119,6 @@ PRIV_CONFIG_FILES = [
     "/etc/ssh/sshd_config",
 ]
 PRIV_CONFIG_ROOT_FILES = ["/etc/shadow", "/etc/gshadow"]
-
-# Suid binaries to audit
-SUID_BINARIES = [
-    "/usr/bin/su", "/usr/bin/sudo", "/usr/bin/passwd",
-    "/usr/bin/chsh", "/usr/bin/chage", "/usr/bin/chfn",
-    "/usr/bin/gpasswd", "/usr/bin/newgrp", "/usr/bin/pkexec",
-    "/usr/bin/mount", "/usr/bin/umount", "/usr/bin/at",
-    "/usr/bin/crontab", "/bin/mount", "/bin/umount", "/bin/su",
-    "/usr/bin/fusermount", "/usr/bin/fusermount3",
-    "/usr/lib/polkit-1/polkit-agent-helper-1",
-]
 
 # --- Color/output ----------------------------------------------------------
 
@@ -267,6 +257,13 @@ def read_text_safe(path, max_bytes=65536):
 
 def is_root():
     return os.geteuid() == 0
+
+_SYSTEMD_RUNNING = None
+def systemd_running():
+    global _SYSTEMD_RUNNING
+    if _SYSTEMD_RUNNING is None:
+        _SYSTEMD_RUNNING = os.path.exists("/run/systemd/system")
+    return _SYSTEMD_RUNNING
 
 def _algif_aead_state():
     """Returns one of: 'builtin', 'loaded_module', 'absent'.
@@ -635,7 +632,7 @@ def check_systemd_restrict_address_families():
     Hosting daemons (sshd, web, mail, scheduler) and container/orchestration
     runtimes are all candidates - any process that forks off code run by
     less-trusted principals benefits from the AF_ALG cut at the unit level."""
-    if not os.path.exists("/run/systemd/system"):
+    if not systemd_running():
         return Check("systemd_restrict", "MITIGATION", Status.SKIP,
                      "systemd not running")
     daemons = [
@@ -718,7 +715,7 @@ def check_user_service_dropin():
     instances. A RestrictAddressFamilies drop-in here propagates the seccomp
     filter to every login session AND rootless podman/container - one of the
     highest-leverage mitigation points on a multi-user box."""
-    if not os.path.exists("/run/systemd/system"):
+    if not systemd_running():
         return Check("user_service_dropin", "MITIGATION", Status.SKIP,
                      "systemd not running")
     paths = (glob.glob("/etc/systemd/system/user@.service.d/*.conf") +
@@ -741,12 +738,25 @@ def check_user_service_dropin():
                              "podman container. New sessions inherit; existing "
                              "lingering instances need restart.")
 
+def _daemon_has_afalg_dropin(daemon):
+    """Does <daemon>.service have a drop-in that blocks AF_ALG?"""
+    raf_re = re.compile(
+        r"^\s*RestrictAddressFamilies\s*=\s*(.+)$", re.MULTILINE)
+    for unit_dir in ("/etc/systemd/system", "/usr/lib/systemd/system",
+                     "/lib/systemd/system"):
+        for f in glob.glob(unit_dir + "/" + daemon + ".service.d/*.conf"):
+            text = read_text_safe(f) or ""
+            m = raf_re.search(text)
+            if m and _af_alg_blocked_by_restrict(m.group(1).strip()):
+                return f
+    return None
+
 def check_seccomp_runtime():
     """Verify seccomp filter is actually loaded into running daemons by
     reading /proc/PID/status - Seccomp=2 means filter mode active. Catches
     the case where a drop-in exists but the daemon was never restarted to
     pick it up."""
-    if not os.path.exists("/run/systemd/system"):
+    if not systemd_running():
         return Check("seccomp_runtime", "DETECTION", Status.SKIP,
                      "systemd not running")
     daemons = ["sshd", "httpd", "nginx", "containerd", "docker"]
@@ -767,45 +777,71 @@ def check_seccomp_runtime():
             continue
         mode = int(m.group(1))
         # 0 = disabled, 1 = strict, 2 = filter
-        findings.append((d, pid, mode))
+        dropin = _daemon_has_afalg_dropin(d)
+        findings.append((d, pid, mode, dropin))
     if not findings:
         return Check("seccomp_runtime", "DETECTION", Status.SKIP,
                      "no relevant running daemons to inspect")
-    filtered = [d for d, _, m in findings if m == 2]
-    unfiltered = [d for d, _, m in findings if m != 2]
+    filtered = [d for d, _, m, _ in findings if m == 2]
+    unfiltered = [(d, dp) for d, _, m, dp in findings if m != 2]
+    stale = [d for d, dp in unfiltered if dp is not None]
+    no_dropin = [d for d, dp in unfiltered if dp is None]
     if filtered and not unfiltered:
         return Check("seccomp_runtime", "DETECTION", Status.OK,
                      "all {} inspected daemons have seccomp filter active".format(
                          len(filtered)),
                      details={"filtered": filtered})
+    # Build remediation tailored to which sub-cause applies.
+    rem_parts = []
+    if stale:
+        rem_parts.append("Stale daemons (drop-in exists but not loaded): "
+                         "systemctl restart " + " ".join(stale))
+    if no_dropin:
+        rem_parts.append("No drop-in for: " + ", ".join(no_dropin) +
+                         ". Add /etc/systemd/system/<svc>.service.d/"
+                         "no-afalg.conf with [Service] "
+                         "RestrictAddressFamilies=~AF_ALG and "
+                         "SystemCallArchitectures=native, then daemon-reload "
+                         "+ restart.")
+    details = {"filtered": filtered,
+               "unfiltered_stale_dropin": stale,
+               "unfiltered_no_dropin": no_dropin}
     if filtered and unfiltered:
         return Check("seccomp_runtime", "DETECTION", Status.WARN,
                      "{} daemons have seccomp filter, {} do not".format(
                          len(filtered), len(unfiltered)),
-                     details={"filtered": filtered, "unfiltered": unfiltered})
+                     details=details,
+                     remediation=" ".join(rem_parts))
     return Check("seccomp_runtime", "DETECTION", Status.WARN,
                  "{} running daemons have NO seccomp filter loaded".format(
                      len(unfiltered)),
-                 details={"unfiltered": unfiltered},
-                 remediation="Daemons may have a drop-in file but never picked "
-                             "it up - restart the daemon (systemctl restart <svc>) "
-                             "or check that the drop-in actually contains the directive.")
+                 details=details,
+                 remediation=" ".join(rem_parts))
 
 def check_dropin_freshness():
     """Detect stale daemons: drop-in file is newer than the running daemon's
     process start time. Means the file changed but the daemon was never
     restarted to pick it up - filter isn't active despite the file existing."""
-    if not os.path.exists("/run/systemd/system"):
+    if not systemd_running():
         return Check("dropin_freshness", "MITIGATION", Status.SKIP,
                      "systemd not running")
     daemons_to_dropins = {}
+    raf_re = re.compile(
+        r"^\s*RestrictAddressFamilies\s*=\s*(.+)$", re.MULTILINE)
     for unit_dir in ("/etc/systemd/system", "/usr/lib/systemd/system",
                      "/lib/systemd/system"):
         for d in glob.glob(unit_dir + "/*.service.d"):
             unit_name = os.path.basename(d).replace(".service.d", "")
             for f in glob.glob(d + "/*.conf"):
                 text = read_text_safe(f) or ""
-                if "AF_ALG" in text and "RestrictAddressFamilies" in text:
+                # Only consider drop-ins whose actual RestrictAddressFamilies=
+                # directive blocks AF_ALG. Substring matching here previously
+                # mis-categorised drop-ins that merely mentioned AF_ALG in a
+                # comment.
+                m = raf_re.search(text)
+                if not m:
+                    continue
+                if _af_alg_blocked_by_restrict(m.group(1).strip()):
                     daemons_to_dropins.setdefault(unit_name, []).append(f)
     if not daemons_to_dropins:
         return Check("dropin_freshness", "MITIGATION", Status.SKIP,
@@ -847,32 +883,151 @@ def check_dropin_freshness():
 
 # --- Hardening checks ------------------------------------------------------
 
-def check_suid_binary(path):
-    if not os.path.lexists(path):
-        return None
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    mode = st.st_mode
-    is_suid = bool(mode & stat.S_ISUID)
-    other_x = bool(mode & stat.S_IXOTH)
-    perms = stat.filemode(mode)
-    name = "suid:" + os.path.basename(path)
-    if not is_suid:
-        return Check(name, "HARDENING", Status.OK,
-                     "{} not setuid ({})".format(path, perms),
-                     details={"path": path, "mode": oct(mode & 0o7777)})
-    if is_suid and other_x:
-        return Check(name, "HARDENING", Status.WARN,
-                     "{} setuid + tenant-executable ({}) - substitution target".format(
-                         path, perms),
-                     details={"path": path, "mode": oct(mode & 0o7777)},
-                     remediation="If tenants don't need it: chmod 4750 root:wheel "
-                                 "{} (or drop suid bit entirely).".format(path))
-    return Check(name, "HARDENING", Status.OK,
-                 "{} suid but locked down ({})".format(path, perms),
-                 details={"path": path, "mode": oct(mode & 0o7777)})
+# Canonical SUID set across mainstream distros. Used as a "this is expected"
+# allow-list when classifying setuid binaries, and as a fallback list when
+# we can't run find as root. Membership here means "expected to exist as
+# setuid on at least one mainstream distro" - missing or non-setuid on a
+# given host is fine.
+EXPECTED_SUID = set([
+    "/usr/bin/su", "/bin/su", "/usr/bin/sudo",
+    "/usr/bin/passwd", "/usr/bin/chsh", "/usr/bin/chage", "/usr/bin/chfn",
+    "/usr/bin/gpasswd", "/usr/bin/newgrp", "/usr/bin/pkexec",
+    "/usr/bin/mount", "/usr/bin/umount", "/bin/mount", "/bin/umount",
+    "/usr/bin/at", "/usr/bin/crontab",
+    "/usr/bin/fusermount", "/usr/bin/fusermount3",
+    "/usr/bin/fusermount-glusterfs",
+    "/usr/lib/polkit-1/polkit-agent-helper-1",
+    "/usr/sbin/unix_chkpwd", "/usr/sbin/pam_timestamp_check",
+    "/usr/sbin/mount.nfs", "/usr/sbin/usernetctl", "/usr/sbin/userhelper",
+    "/usr/sbin/grub2-set-bootflag",
+    "/usr/bin/ksu",
+    "/usr/bin/keybase-redirector",
+    # Debian/Ubuntu
+    "/usr/lib/openssh/ssh-keysign",
+    "/usr/lib/eject/dmcrypt-get-device",
+    "/usr/lib/dbus-1.0/dbus-daemon-launch-helper",
+    # Fedora/RHEL
+    "/usr/libexec/openssh/ssh-keysign",
+    "/usr/libexec/dbus-1/dbus-daemon-launch-helper",
+    "/usr/libexec/qemu-bridge-helper",
+    "/usr/libexec/Xorg.wrap",
+    "/usr/libexec/spice-gtk-x86_64/spice-client-glib-usb-acl-helper",
+    # Vendor / third-party desktop
+    "/usr/lib64/chromium-browser/chrome-sandbox",
+    "/usr/share/antigravity/chrome-sandbox",
+    "/opt/google/chrome/chrome-sandbox",
+    "/opt/keybase/chrome-sandbox",
+    "/usr/bin/vmware-user-suid-wrapper",
+])
+
+# System filesystem prefixes worth scanning for SUID outliers. We deliberately
+# do NOT include /home, /var, /tmp, or container/snapshot mount roots:
+# those produce noise from docker overlay layers, tarball extracts, snap
+# images, and user-controlled content that isn't actually executable from
+# the host's privilege boundary.
+SUID_SCAN_ROOTS = ["/usr", "/opt", "/usr/local", "/sbin", "/bin"]
+
+# Path substrings that, if present, mean a result is from an isolated
+# container/snapshot layer rather than a host-reachable binary. Belt-and-
+# suspenders for sites that have docker storage on the same FS as /usr.
+SUID_PATH_EXCLUDES = (
+    "/overlay2/", "/overlayfs/", "/snapshots/", "/containerd/",
+    "/.snapshots/", "/.zfs/snapshot/", "/btrfs/subvol/",
+    "/var/lib/containers/", "/var/lib/docker/",
+)
+
+def _scan_suid_inventory():
+    """Return a list of paths whose setuid bit is set, under SUID_SCAN_ROOTS.
+
+    Root: uses find for completeness. Container/snapshot paths are filtered
+    out post-find, since some sites have docker storage on the same device
+    as /usr and -xdev wouldn't catch them.
+
+    Non-root or find failure: falls back to stat-checking EXPECTED_SUID. The
+    fallback is best-effort - it cannot discover non-canonical setuid
+    binaries planted by an attacker. That is documented as a limitation.
+    """
+    discovered = []
+    if is_root():
+        roots = [r for r in SUID_SCAN_ROOTS
+                 if os.path.isdir(r) and not os.path.islink(r)]
+        if roots:
+            cmd = (["find"] + roots
+                   + ["-xdev", "-type", "f", "-perm", "-4000",
+                      "-printf", "%p\\n"])
+            rc, out, _ = run_cmd(cmd, timeout=30)
+            if rc == 0:
+                for line in out.decode("utf-8", "replace").splitlines():
+                    p = line.strip()
+                    if not p:
+                        continue
+                    if any(ex in p for ex in SUID_PATH_EXCLUDES):
+                        continue
+                    discovered.append(p)
+    if not discovered:
+        for p in EXPECTED_SUID:
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if st.st_mode & stat.S_ISUID:
+                discovered.append(p)
+    return discovered
+
+def check_suid_inventory():
+    """Consolidated SUID audit (replaces N near-duplicate per-binary lines).
+
+    Verdict:
+      OK   - all setuid binaries are canonical and have nominal modes
+      WARN - non-canonical paths or unusual modes (4777, 6755 with group
+             write, etc.) found
+    """
+    paths = _scan_suid_inventory()
+    confirmed = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        # Defence against TOCTOU: only count files where the setuid bit is
+        # actually set right now. Skip silently otherwise.
+        if not (st.st_mode & stat.S_ISUID):
+            continue
+        confirmed.append((p, st.st_mode & 0o7777))
+    if not confirmed:
+        return Check("suid_inventory", "HARDENING", Status.OK,
+                     "no setuid binaries found in {}".format(SUID_SCAN_ROOTS))
+    unexpected = []
+    odd_mode = []
+    # Modes considered "nominal" for an expected setuid: setuid set, user
+    # rwx, group/other r-x or x-only, optional setgid. We flag world/group
+    # writable explicitly as anomalous.
+    for p, mode in sorted(confirmed):
+        if mode & 0o022:  # group-write or world-write set on a setuid binary
+            odd_mode.append((p, oct(mode)))
+            continue
+        if p not in EXPECTED_SUID:
+            unexpected.append((p, oct(mode)))
+    msg = "{} setuid binaries inventoried".format(len(confirmed))
+    details = {"total": len(confirmed), "scan_roots": SUID_SCAN_ROOTS,
+               "canonical": len(confirmed) - len(unexpected) - len(odd_mode),
+               "unexpected": [{"path": p, "mode": m} for p, m in unexpected],
+               "odd_mode": [{"path": p, "mode": m} for p, m in odd_mode]}
+    if unexpected or odd_mode:
+        parts = []
+        if unexpected:
+            parts.append("{} non-canonical".format(len(unexpected)))
+        if odd_mode:
+            parts.append("{} group/world-writable".format(len(odd_mode)))
+        return Check("suid_inventory", "HARDENING", Status.WARN,
+                     msg + " (" + ", ".join(parts) + ")",
+                     details=details,
+                     remediation="Audit non-canonical entries; each is a "
+                                 "page-cache substitution target equivalent "
+                                 "to root if exploited via CVE-2026-31431.")
+    return Check("suid_inventory", "HARDENING", Status.OK,
+                 msg + " (all canonical, modes nominal)",
+                 details=details)
 
 def _hash_pagecache(path):
     try:
@@ -912,15 +1067,35 @@ def check_page_cache_integrity():
             out.append(Check("pagecache:" + path, "HARDENING", Status.OK,
                              "{} page cache matches disk".format(path),
                              details={"path": path, "sha256": cached}))
-        else:
-            out.append(Check(
-                "pagecache:" + path, "HARDENING", Status.VULN,
-                "PAGE CACHE CORRUPTION on {}: cached={} disk={}".format(
-                    path, cached[:16], direct[:16]),
-                details={"path": path, "cached_sha256": cached,
-                         "disk_sha256": direct},
-                remediation="ACTIVE IOC - investigate. Evict cache: "
-                            "vmtouch -e {} (then forensic image the host).".format(path)))
+            continue
+        # Divergence is a *potential* IOC, not a confirmed CVE-2026-31431
+        # exploitation: it can also arise from a concurrent writer between
+        # the two reads, an active fsync window, or filesystem-level
+        # caching quirks (overlay/btrfs snapshots). Trigger_probe is the
+        # only check that produces a definitive VULN verdict.
+        # Re-read after a short delay to filter out transient writer races;
+        # only stable divergence is reported.
+        time.sleep(0.2)
+        cached2 = _hash_pagecache(path)
+        direct2 = _hash_direct(path)
+        if cached2 is None or direct2 is None or cached2 == direct2:
+            out.append(Check("pagecache:" + path, "HARDENING", Status.OK,
+                             "{} page cache transient divergence; "
+                             "stable on re-read".format(path),
+                             details={"path": path,
+                                      "transient_first_sha256": cached,
+                                      "stable_sha256": cached2 or direct2}))
+            continue
+        out.append(Check(
+            "pagecache:" + path, "HARDENING", Status.WARN,
+            "page cache differs from disk on {} (stable across re-read): "
+            "cached={} disk={}".format(path, cached2[:16], direct2[:16]),
+            details={"path": path, "cached_sha256": cached2,
+                     "disk_sha256": direct2},
+            remediation="Stable divergence is a potential page-cache "
+                        "substitution IOC. Evict cache (vmtouch -e {}), "
+                        "snapshot the host for forensics, and correlate "
+                        "with audit logs for AF_ALG/splice activity.".format(path)))
     return out
 
 def check_file_capabilities():
@@ -988,34 +1163,86 @@ def check_auditd():
                          "-F path=/usr/bin/su -k su_exec"))
     return out
 
+def _scan_text_for_ioc(text):
+    """Returns (shim_blocks, afalg_audit, splice_audit) counts in text."""
+    shim_blocks = 0
+    if "no-afalg" in text and "blocked AF_ALG" in text:
+        shim_blocks = text.count("blocked AF_ALG")
+    return (shim_blocks,
+            text.count("afalg_attempt"),
+            text.count("splice_call"))
+
 def check_recent_ioc_signals():
-    """Look for shim/audit IOCs in recent logs (root-only, non-fatal)."""
+    """Look for shim/audit IOCs in recent logs (root-only, non-fatal).
+
+    Sources, in order:
+      - /var/log/secure (RHEL/Fedora rsyslog)
+      - /var/log/auth.log (Debian/Ubuntu rsyslog)
+      - journalctl (systemd-journald, fallback for journald-only hosts)
+      - /var/log/audit/audit.log (auditd)
+    """
     if not is_root():
         return Check("recent_iocs", "DETECTION", Status.SKIP,
                      "root needed to scan auth/audit logs")
     findings = []
-    # RHEL: /var/log/secure   Debian/Ubuntu: /var/log/auth.log
+    sources_seen = []
+    shim_total = afalg_total = splice_total = 0
+
     for log_path in ("/var/log/secure", "/var/log/auth.log"):
-        text = read_text_safe(log_path, max_bytes=512*1024) or ""
-        if "no-afalg" in text and "blocked AF_ALG" in text:
-            n = text.count("blocked AF_ALG")
+        text = read_text_safe(log_path, max_bytes=512*1024)
+        if text is None:
+            continue
+        sources_seen.append(log_path)
+        sb, _, _ = _scan_text_for_ioc(text)
+        if sb:
+            shim_total += sb
             findings.append("{}: shim blocked {} AF_ALG attempts".format(
-                log_path, n))
+                log_path, sb))
+
+    # Journald fallback: only consult journalctl if neither rsyslog file
+    # surfaced shim activity (avoids double-counting on hosts that have
+    # both rsyslog and persistent journal).
+    if shim_total == 0 and os.path.exists("/run/systemd/journal/socket"):
+        rc, out, _ = run_cmd(
+            ["journalctl", "--no-pager", "-q", "--since", "-7d",
+             "-t", "no-afalg"], timeout=10)
+        if rc == 0:
+            jtext = out.decode("utf-8", "replace")
+            sources_seen.append("journalctl -t no-afalg")
+            sb, _, _ = _scan_text_for_ioc(jtext)
+            if sb:
+                shim_total += sb
+                findings.append("journalctl: shim blocked {} AF_ALG attempts "
+                                "(last 7 days)".format(sb))
+
     audit_text = read_text_safe("/var/log/audit/audit.log",
-                                max_bytes=1024*1024) or ""
-    if "afalg_attempt" in audit_text:
-        n = audit_text.count("afalg_attempt")
-        findings.append("auditd logged {} afalg_attempt events".format(n))
-    if "splice_call" in audit_text:
-        n = audit_text.count("splice_call")
-        findings.append("auditd logged {} splice events".format(n))
+                                max_bytes=1024*1024)
+    if audit_text is not None:
+        sources_seen.append("/var/log/audit/audit.log")
+        _, af, sp = _scan_text_for_ioc(audit_text)
+        if af:
+            afalg_total += af
+            findings.append("auditd logged {} afalg_attempt events".format(af))
+        if sp:
+            splice_total += sp
+            findings.append("auditd logged {} splice events".format(sp))
+
+    if not sources_seen:
+        return Check("recent_iocs", "DETECTION", Status.SKIP,
+                     "no readable auth/audit log sources found")
     if findings:
         return Check("recent_iocs", "DETECTION", Status.WARN,
                      "; ".join(findings),
+                     details={"shim_blocks": shim_total,
+                              "afalg_audit_events": afalg_total,
+                              "splice_audit_events": splice_total,
+                              "sources": sources_seen},
                      remediation="Investigate uids/pids and correlate with "
                                  "su/sshd authentication events.")
     return Check("recent_iocs", "DETECTION", Status.OK,
-                 "no AF_ALG IOC signals in recent logs")
+                 "no AF_ALG IOC signals in {} log source(s)".format(
+                     len(sources_seen)),
+                 details={"sources": sources_seen})
 
 # --- Orchestration ---------------------------------------------------------
 
@@ -1066,9 +1293,8 @@ def run_all_checks(args):
     add_one(check_dropin_freshness(), "MITIGATION")
 
     if not args.skip_hardening:
-        PROGRESS.step("auditing setuid binaries")
-        for path in SUID_BINARIES:
-            add_one(check_suid_binary(path), "HARDENING")
+        PROGRESS.step("inventorying setuid binaries")
+        add_one(check_suid_inventory(), "HARDENING")
         PROGRESS.step("checking page-cache integrity (privilege configs)")
         add_many(check_page_cache_integrity(), "HARDENING")
         PROGRESS.step("scanning file capabilities")
@@ -1095,6 +1321,120 @@ def determine_exit_code(results):
         return 4
     return 0
 
+# Map check names to posture-layer slots. Each slot is "ok" if the named
+# check is OK, "missing" otherwise. Lets a SIEM / dashboard consumer answer
+# "what defenses does this host actually have?" without re-implementing
+# our verdict logic on top of 50 raw check results.
+POSTURE_LAYERS = [
+    ("kernel_patched",       "trigger_probe"),
+    ("af_alg_unreachable",   "af_alg_socket"),
+    ("modprobe_blacklist",   "modprobe_blacklist"),
+    ("ld_preload_shim",      "shim_blocks_af_alg"),
+    ("systemd_restriction",  "systemd_restrict"),
+    ("user_service_dropin",  "user_service_dropin"),
+    ("seccomp_runtime",      "seccomp_runtime"),
+    ("auditd_running",       "auditd_running"),
+    ("audit_rule_af_alg",    "audit_rule_af_alg"),
+]
+
+def determine_posture(results):
+    by_name = {r.name: r for r in results}
+    layers = {}
+    for slot, check_name in POSTURE_LAYERS:
+        r = by_name.get(check_name)
+        if r is None:
+            layers[slot] = "not_evaluated"
+        elif r.status == Status.OK:
+            layers[slot] = "ok"
+        elif r.status == Status.SKIP:
+            layers[slot] = "skipped"
+        else:
+            layers[slot] = "missing"
+    # Headline verdict, derived from layers + raw results.
+    has_vuln = any(r.status == Status.VULN for r in results)
+    if has_vuln and layers.get("ld_preload_shim") == "ok":
+        verdict = "vulnerable_kernel_userspace_mitigated"
+    elif has_vuln:
+        verdict = "vulnerable"
+    elif layers.get("kernel_patched") == "ok":
+        verdict = "patched"
+    elif layers.get("af_alg_unreachable") == "ok":
+        verdict = "kernel_likely_safe"
+    else:
+        verdict = "inconclusive"
+    return {"verdict": verdict, "layers": layers}
+
+def emit_remediation_script(results):
+    """Print a bash script of the remediations from non-OK checks.
+
+    Aggregates Check.remediation strings as comments + commented-out
+    commands. Fleet operators are expected to review before pasting:
+    several remediations (chmod 4750 on suid binaries, modules_disabled
+    sysctl) are operationally consequential and policy-dependent.
+    """
+    posture = determine_posture(results)
+    lines = [
+        "#!/bin/bash",
+        "# Auto-generated remediation suggestions for CVE-2026-31431.",
+        "# Hostname: {}    Kernel: {}".format(
+            os.uname().nodename, os.uname().release),
+        "# Verdict:  {}".format(posture["verdict"]),
+        "#",
+        "# REVIEW EVERY BLOCK BEFORE RUNNING. Some changes (chmod on suid",
+        "# binaries, kernel.modules_disabled=1) are policy-dependent or",
+        "# require a reboot to recover from. Lines are commented out by",
+        "# default; uncomment the ones you actually want to apply.",
+        "",
+        "set -euo pipefail",
+        "",
+    ]
+    actionable = [r for r in results
+                  if r.status not in (Status.OK, Status.INFO, Status.SKIP)
+                  and r.remediation]
+    if not actionable:
+        lines.append("# No actionable remediations - posture appears clean.")
+        print("\n".join(lines))
+        return
+    for r in actionable:
+        lines.append("# ----------------------------------------------------")
+        lines.append("# [{}/{}] {}: {}".format(
+            r.status.upper(), r.category, r.name, r.message))
+        for ln in r.remediation.splitlines():
+            lines.append("# " + ln)
+        lines.append("")
+    # Append a small block of canonical commands the auditor knows are
+    # safe to run unattended; keep them commented so review remains
+    # mandatory.
+    lines += [
+        "# === Canonical commands (review and uncomment to apply) =====",
+        "#",
+        "# # 1. Drop AF_ALG modules + blacklist:",
+        "# rmmod algif_aead 2>/dev/null || true",
+        "# cat >/etc/modprobe.d/99-no-afalg.conf <<'EOF'",
+        "# install af_alg /bin/false",
+        "# install algif_aead /bin/false",
+        "# install algif_skcipher /bin/false",
+        "# install algif_hash /bin/false",
+        "# install algif_rng /bin/false",
+        "# EOF",
+        "#",
+        "# # 2. systemd user@.service drop-in:",
+        "# install -d /etc/systemd/system/user@.service.d",
+        "# cat >/etc/systemd/system/user@.service.d/no-afalg.conf <<'EOF'",
+        "# [Service]",
+        "# RestrictAddressFamilies=~AF_ALG",
+        "# SystemCallArchitectures=native",
+        "# EOF",
+        "# systemctl daemon-reload",
+        "#",
+        "# # 3. auditd rules:",
+        "# auditctl -a always,exit -F arch=b64 -S socket -F a0=38 \\",
+        "#   -k afalg_attempt",
+        "# auditctl -a always,exit -F arch=b64 -S splice -k splice_call",
+        "",
+    ]
+    print("\n".join(lines))
+
 def main():
     parser = argparse.ArgumentParser(
         description="CVE-2026-31431 'Copy Fail' comprehensive checker",
@@ -1111,6 +1451,10 @@ def main():
                         help="filter: ENV,KERNEL,MITIGATION,HARDENING,DETECTION")
     parser.add_argument("--no-progress", action="store_true",
                         help="suppress in-progress status output to stderr")
+    parser.add_argument("--emit-remediation", action="store_true",
+                        help="instead of the report, print a bash script "
+                             "of the remediations for every non-OK check "
+                             "(stdout); review before executing")
     args = parser.parse_args()
 
     # Enable progress output unless explicitly disabled or in JSON mode where
@@ -1130,15 +1474,20 @@ def main():
               file=sys.stderr)
         return 1
 
+    if args.emit_remediation:
+        emit_remediation_script(results)
+        return determine_exit_code(results)
+
     if args.json:
         out = {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "tool": "copyfail_checker",
             "cve": "CVE-2026-31431",
             "timestamp": int(time.time()),
             "hostname": os.uname().nodename,
             "kernel": os.uname().release,
             "checks": [r.to_dict() for r in results],
+            "posture": determine_posture(results),
             "summary": {
                 "total": len(results),
                 "ok":    sum(1 for r in results if r.status == Status.OK),
