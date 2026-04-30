@@ -107,22 +107,45 @@ require a kernel module to be loaded by the attacker (the relevant
 crypto modules are auto-loaded by `socket(AF_ALG, ...)` itself on most
 distributions) and that **leaves no on-disk forensic artefacts**.
 
-## Defense-in-depth
+## Defense-in-depth: where this rung carries weight on its own
 
-No single layer is enough. Five rungs ship together because each is
-bypassable in a different way:
+There are five layers of defense for AF_ALG-class bugs, and every one
+has failure modes. The point of this package is that the conditions
+that defeat the rungs above it are **not the same conditions that
+defeat the shim** — which is what makes the shim a viable primary
+defense, not just a backup.
 
-| # | Layer | Bypass |
+| Rung | Where it fails | What the shim does there |
 |---|---|---|
-| 1 | Kernel patch (vendor) | (none) — the only complete fix |
-| 2 | `modprobe` blacklist of `algif_aead`/`authenc`/`authencesn` | already-resident modules; statically built kernels |
-| 3 | systemd `RestrictAddressFamilies=~AF_ALG` drop-in | processes started outside systemd (cron, login shells, container payloads) |
-| 4 | **`LD_PRELOAD` shim (this package)** | static binaries; processes that issue the syscall instruction directly |
-| 5 | seccomp filter (per-unit / container-runtime) | operationally heavier; deploy per-service |
+| 1. Kernel patch (vendor) | EL7 is EOL; EL8/EL9/EL10 patch rollout lags disclosure by days to weeks; production reboot may not be available in the window the bug is hot | **Closes the window without a reboot.** Live install, no kernel touch |
+| 2. `modprobe` blacklist of `algif_aead` / `authenc` / `authencesn` | No-op when `algif_aead` is built into the kernel (the **RHEL default**); already-resident modules from earlier in boot | **Still effective** — every userspace caller goes through libc `socket(2)` regardless of how the kernel exposed AF_ALG |
+| 3. systemd `RestrictAddressFamilies=~AF_ALG` | Reaches only services systemd starts post-restriction. Misses **cron jobs, sshd login shells, container payloads with their own pid 1**, anything pre-restriction | **Global.** `/etc/ld.so.preload` applies to every dynamic-linked process regardless of which init started it |
+| 4. **`LD_PRELOAD` shim (this package)** | Static binaries; processes issuing the `syscall` instruction directly; SUID binaries (kernel strips `LD_PRELOAD` for secure-exec) | (see right column for coverage scope) |
+| 5. seccomp filter (per-unit / container-runtime) | Per-service. Operationally heavy: each unit/runtime needs an explicit policy | **One .so + one ld.so.preload line** covers the whole host |
 
-This package fills rung 4. The auditor scores all five and tells you
-which are present, which are stale, and which are bypassable on the
-current host. It does **not** assume any single layer is sufficient.
+Where the shim itself fails — static binaries, direct `syscall`
+instruction, SUID stripping — is **attacker engineering territory**.
+The other rungs fail under **routine operator reality**: vendors
+haven't shipped yet, the kernel was built with builtin crypto, the
+threat surface includes a cron job. That asymmetry is the case for
+deploying this rung first.
+
+### When this is your primary defense
+
+- The vendor kernel patch isn't out yet (zero-day window).
+- It is out, but you can't reboot the host *right now*.
+- The kernel has `algif_aead` builtin (so `modprobe` blacklist is a
+  no-op).
+- Your threat surface includes anything outside systemd — cron, login
+  shells, container payloads, anything inheriting from a
+  pre-restriction unit.
+- You don't have the operational bandwidth to write per-service
+  seccomp policy for every daemon.
+
+The auditor scores all five rungs against the running host and tells
+you which are present, stale, or bypassable — so you can layer
+additional defenses as they become available without losing track of
+what's actually load-bearing right now.
 
 ## What the shim deliberately does NOT do
 
