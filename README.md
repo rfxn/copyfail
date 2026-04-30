@@ -72,6 +72,44 @@ The enable helper does `LD_PRELOAD=$shim /bin/true` first; if the .so
 cannot be loaded the helper refuses to update the file rather than risk
 locking you out.
 
+## Also blacklist the AF_ALG modules (where loadable)
+
+The package also ships an equally low-barrier mitigation: a `modprobe`
+drop-in that severs `algif_aead`, `authenc`, and `authencesn` at the
+kernel level. When your kernel exposes AF_ALG as a loadable module —
+most stock mainline kernels do — this **stacks with the shim** and
+deserves equal weight. The shim blocks every userspace caller at libc;
+the blacklist removes the kernel attack surface entirely. Different
+mechanisms, both one-line operator actions.
+
+```sh
+# Decide whether the blacklist will be effective on this kernel.
+ls /sys/module/algif_aead 2>/dev/null && echo "modular - blacklist effective" \
+    || echo "builtin or absent - shim is your primary defense"
+grep -E 'ALG_USERMODE|CRYPTO_USER_API' /boot/config-$(uname -r) 2>/dev/null
+# =m -> modular (blacklist is primary)   =y -> builtin (shim is primary)
+
+# If it's modular, drop a blacklist into /etc/modprobe.d/ and unload
+# anything already resident. The CVE-2026-31431 chain is the trio at
+# the bottom; the algif_* family is added for general AF_ALG hygiene.
+sudo tee /etc/modprobe.d/99-no-afalg.conf >/dev/null <<'EOF'
+install af_alg          /bin/false
+install algif_aead      /bin/false
+install algif_skcipher  /bin/false
+install algif_hash      /bin/false
+install algif_rng       /bin/false
+install authenc         /bin/false
+install authencesn      /bin/false
+EOF
+sudo rmmod algif_aead authenc authencesn 2>/dev/null || true
+```
+
+(The package also ships this file under
+`/usr/share/doc/afalg-defense/examples/no-afalg-modprobe.conf` — same
+content, copy that into place if you prefer the audit trail.) Where
+your kernel allows it, deploy **both** the shim and the blacklist —
+belt-and-suspenders coverage for the price of two `sudo` commands.
+
 ## Verify
 
 ```sh
@@ -145,7 +183,7 @@ defense, not just a backup.
 | Rung | Where it fails | What the shim does there |
 |---|---|---|
 | 1. Kernel patch (vendor) | EL7 is EOL; EL8/EL9/EL10 patch rollout lags disclosure by days to weeks; production reboot may not be available in the window the bug is hot | **Closes the window without a reboot.** Live install, no kernel touch |
-| 2. `modprobe` blacklist of `algif_aead` / `authenc` / `authencesn` | No-op when `algif_aead` is built into the kernel (the **RHEL default**); already-resident modules from earlier in boot | **Still effective** — every userspace caller goes through libc `socket(2)` regardless of how the kernel exposed AF_ALG |
+| 2. `modprobe` blacklist of `algif_aead` / `authenc` / `authencesn` | Only when these are loaded as **modules** (not builtin) — and not already resident from earlier in boot. **On modular kernels (most stock mainline), this is an equally low-barrier primary defense** that stacks with the shim. Becomes a no-op when `algif_aead` is builtin (the RHEL default) | **Picks up the slack on builtin-crypto kernels** — every userspace caller still goes through libc `socket(2)` regardless of how the kernel exposed AF_ALG |
 | 3. systemd `RestrictAddressFamilies=~AF_ALG` | Reaches only services systemd starts post-restriction. Misses **cron jobs, sshd login shells, container payloads with their own pid 1**, anything pre-restriction | **Global.** `/etc/ld.so.preload` applies to every dynamic-linked process regardless of which init started it |
 | 4. **`LD_PRELOAD` shim (this package)** | Static binaries; processes issuing the `syscall` instruction directly; SUID binaries (kernel strips `LD_PRELOAD` for secure-exec) | (see right column for coverage scope) |
 | 5. seccomp filter (per-unit / container-runtime) | Per-service. Operationally heavy: each unit/runtime needs an explicit policy | **One .so + one ld.so.preload line** covers the whole host |
