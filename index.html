@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>copyfail / afalg-defense - DNF repository</title>
+<style>
+ body{font-family:system-ui,sans-serif;max-width:48rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
+ h1,h2{font-weight:600}
+ code,pre{background:#f4f4f4;padding:.1rem .3rem;border-radius:3px;font-size:.95em}
+ pre{padding:.6rem .9rem;overflow-x:auto}
+ a{color:#0a4}
+ table{border-collapse:collapse;width:100%}
+ th,td{text-align:left;padding:.3rem .6rem;border-bottom:1px solid #ddd}
+ .note{background:#fffbe5;border-left:4px solid #d4a017;padding:.6rem .9rem;margin:1rem 0}
+</style>
+</head>
+<body>
+
+<h1>copyfail / afalg-defense</h1>
+<p>
+Userspace defensive primitives for CVE-2026-31431 ("Copy Fail") and the
+broader AF_ALG attack surface. LD_PRELOAD shim plus a comprehensive
+read-only host posture auditor. Source:
+<a href="https://github.com/rfxn/copyfail">github.com/rfxn/copyfail</a>.
+</p>
+
+<h2>Add the repo (EL8 / EL9 / EL10)</h2>
+<p>
+A single <code>copyfail.repo</code> file works for all three: it uses
+<code>$releasever</code> + <code>$basearch</code> substitution that dnf
+expands at fetch time.
+</p>
+<pre>curl -sSL https://rfxn.github.io/copyfail/copyfail.repo \
+  | sudo tee /etc/yum.repos.d/copyfail.repo
+sudo dnf install -y afalg-defense</pre>
+
+<p>
+After install, the LD_PRELOAD shim is on disk but <strong>not yet
+active</strong>. Wiring <code>/etc/ld.so.preload</code> from a package
+post-install is too dangerous - one broken upgrade locks every
+dynamic-linked binary out of dlopen. Activation is an explicit
+operator action:
+</p>
+<pre>sudo /usr/sbin/copyfail-shim-enable    # smoke-tests, then writes /etc/ld.so.preload
+sudo /usr/sbin/copyfail-shim-disable   # reverses it</pre>
+
+<p>
+Verify the block is live:
+</p>
+<pre>python3 -c 'import socket; socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)'
+# expect: PermissionError [Errno 1] Operation not permitted</pre>
+
+<h2>Subpackages</h2>
+<table>
+<tr><th>Package</th><th>Arch</th><th>Contents</th></tr>
+<tr><td><code>afalg-defense</code></td><td>x86_64</td><td>Meta - pulls shim + auditor</td></tr>
+<tr><td><code>afalg-defense-shim</code></td><td>x86_64</td>
+    <td><code>/usr/lib64/no-afalg.so</code> + <code>copyfail-shim-{enable,disable}</code> helpers</td></tr>
+<tr><td><code>afalg-defense-auditor</code></td><td>noarch</td>
+    <td><code>/usr/sbin/copyfail-local-check</code> (Python, stdlib-only, read-only)</td></tr>
+</table>
+<p>
+Auditor-only is a valid install pattern for hosts that do not yet
+trust an LD_PRELOAD on every dynamic-linked process:
+</p>
+<pre>sudo dnf install -y afalg-defense-auditor</pre>
+
+<h2>Direct downloads</h2>
+<p>
+Each release on
+<a href="https://github.com/rfxn/copyfail/releases/latest">github.com/rfxn/copyfail/releases</a>
+ships per-EL binary RPMs and an SRPM:
+</p>
+<table>
+<tr><th>EL</th><th>Repository tree</th></tr>
+<tr><td>8</td>  <td><a href="repo/8/x86_64/">/repo/8/x86_64/</a></td></tr>
+<tr><td>9</td>  <td><a href="repo/9/x86_64/">/repo/9/x86_64/</a></td></tr>
+<tr><td>10</td> <td><a href="repo/10/x86_64/">/repo/10/x86_64/</a></td></tr>
+</table>
+
+<div class="note">
+<strong>Unsigned in 1.0.</strong>
+The published RPMs are not yet GPG-signed. The
+<code>copyfail.repo</code> file therefore sets
+<code>gpgcheck=0</code>. Operators with hardened policy should rebuild
+from the published SRPM under their own signing infrastructure, or
+verify by sha256 against the release-asset checksums.
+</div>
+
+<h2>Defense-in-depth context</h2>
+<p>
+The shim is one rung of a five-layer ladder (kernel patch &gt;
+modprobe blacklist &gt; systemd RestrictAddressFamilies &gt; LD_PRELOAD
+shim &gt; seccomp). The auditor scores all five against the running
+host. See the
+<a href="https://github.com/rfxn/copyfail/blob/main/README.md">README</a>
+for the full ladder, what each layer fails to catch, and why
+they ship together.
+</p>
+
+</body>
+</html>
