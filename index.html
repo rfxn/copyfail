@@ -41,6 +41,8 @@
 <div class="source-link">
 source: <a href="https://github.com/rfxn/copyfail">github.com/rfxn/copyfail</a>
 &nbsp;|&nbsp;
+deep dive: <a href="https://www.rfxn.com/research/copyfail-cve-2026-31431">rfxn.com/research/copyfail</a>
+&nbsp;|&nbsp;
 report a problem: <a href="https://github.com/rfxn/copyfail/issues/new/choose">file a GitHub issue</a>
 &nbsp;|&nbsp;
 <a href="https://github.com/rfxn/copyfail/releases">changelog</a>
@@ -62,6 +64,14 @@ window), <code>modprobe</code> blacklist is a no-op because
 <code>RestrictAddressFamilies</code> does not cover the threat surface
 (cron, login shells, container payloads). One .so + one
 <code>ld.so.preload</code> line, system-wide.
+</p>
+<p class="lede">
+🔬 <strong>Read the full writeup:</strong>
+<a href="https://www.rfxn.com/research/copyfail-cve-2026-31431"><strong>Copy Fail
+(CVE-2026-31431) on rfxn.com/research</strong></a> — kernel-level
+mechanics of the AEAD over-read, the splice-into-page-cache path that
+turns it into a privesc primitive, and why the userspace shim closes
+the practical attacker windows.
 </p>
 
 <h2>Add the repo (EL8 / EL9 / EL10)</h2>
