@@ -90,7 +90,15 @@ Install system-wide (every dynamically-linked process inherits it):
 echo /usr/lib64/no-afalg.so > /etc/ld.so.preload
 ```
 
-Verify it took effect:
+Verify it took effect — quick one-liner:
+
+```sh
+python3 -c 'import socket; socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)'
+# Expect: PermissionError: [Errno 1] Operation not permitted
+# Without the shim: succeeds silently and returns a socket object.
+```
+
+Or with `strace` to see the syscall return directly:
 
 ```sh
 strace -e trace=socket python3 -c \
