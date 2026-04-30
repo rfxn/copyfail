@@ -16,17 +16,20 @@
 # After install, activate the LD_PRELOAD shim explicitly:
 #   sudo /usr/sbin/copyfail-shim-enable
 #
-# gpgcheck is disabled in this 1.0 release - the published RPMs are not
-# yet signed. Pin the package by version + sha256 if your environment
-# requires authenticated downloads, or rebuild from the published SRPM
-# under your own signing infrastructure.
+# Signing key fingerprint (1.0.1+):
+#   6001 1CDC EA2F F52D 975A  FDEE 6D30 F32C D5E8 0F80
+#
+# Both the RPMs (gpgcheck) and the repodata (repo_gpgcheck) are verified
+# against this key. dnf will pull the public key from gpgkey= the first
+# time the repo is enabled.
 
 [copyfail]
 name=copyfail / afalg-defense (EL$releasever)
 baseurl=https://rfxn.github.io/copyfail/repo/$releasever/$basearch/
 enabled=1
-gpgcheck=0
-repo_gpgcheck=0
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail
 metadata_expire=1h
 # skip_if_unavailable lets dnf operations on unrelated packages succeed
 # even if rfxn.github.io is briefly unreachable.

@@ -78,13 +78,33 @@ ships per-EL binary RPMs and an SRPM:
 <tr><td>10</td> <td><a href="repo/10/x86_64/">/repo/10/x86_64/</a></td></tr>
 </table>
 
+<h2>Signing</h2>
+<p>
+1.0.1 and later are signed by the <strong>Copyfail Project Signing
+Key</strong>:
+</p>
+<pre>fingerprint: 6001 1CDC EA2F F52D 975A  FDEE 6D30 F32C D5E8 0F80
+uid:         Copyfail Project Signing Key &lt;proj@rfxn.com&gt;
+key file:    <a href="RPM-GPG-KEY-copyfail">/RPM-GPG-KEY-copyfail</a></pre>
+<p>
+The <code>copyfail.repo</code> sets both <code>gpgcheck=1</code>
+(verifies each RPM) and <code>repo_gpgcheck=1</code> (verifies
+<code>repomd.xml</code> via the detached
+<code>repomd.xml.asc</code> we publish alongside it). dnf imports the
+public key from <code>gpgkey=</code> on first use.
+</p>
+<p>Verify out-of-band:</p>
+<pre>curl -sSL https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail | gpg --import
+gpg --fingerprint proj@rfxn.com
+# expect: 6001 1CDC EA2F F52D 975A  FDEE 6D30 F32C D5E8 0F80
+rpm --import https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail
+rpm -K /path/to/afalg-defense-1.0.1-1.el9.x86_64.rpm
+# expect: digests signatures OK</pre>
+
 <div class="note">
-<strong>Unsigned in 1.0.</strong>
-The published RPMs are not yet GPG-signed. The
-<code>copyfail.repo</code> file therefore sets
-<code>gpgcheck=0</code>. Operators with hardened policy should rebuild
-from the published SRPM under their own signing infrastructure, or
-verify by sha256 against the release-asset checksums.
+<strong>1.0.0 was unsigned.</strong> Use 1.0.1 or later. The 1.0.0
+release notes flagged the gap; 1.0.1 closes it under a clean version
+boundary so 1.0.0 stays on record as the documented unsigned baseline.
 </div>
 
 <h2>Defense-in-depth context</h2>
