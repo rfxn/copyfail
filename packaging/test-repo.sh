@@ -117,8 +117,9 @@ for u in containerd docker podman; do
 done
 ok "all expected files installed (subs + active dropins + opt-in examples)"
 
-# 3b. Modprobe drop file content - 9 module entries
-mp_count=$(grep -cE '^install (algif_aead|authenc|authencesn|af_alg|esp4|esp6|xfrm_user|xfrm_algo|rxrpc) /bin/false' \
+# 3b. Modprobe drop file content - 9 module entries.
+# Regex tolerates column-aligned whitespace in the source conf.
+mp_count=$(grep -cE '^install +(algif_aead|authenc|authencesn|af_alg|esp4|esp6|xfrm_user|xfrm_algo|rxrpc) +/bin/false' \
     /etc/modprobe.d/99-copyfail-defense.conf 2>/dev/null || echo 0)
 [ "$mp_count" -eq 9 ] \
     || fail "modprobe drop file has $mp_count install lines, expected 9"
@@ -180,13 +181,15 @@ assert d['posture']['layers']['ld_preload_shim'] == 'ok', d['posture']['layers']
 # v2.0.0: bug_classes_covered (array) and bug_classes (per-class map)
 assert 'bug_classes_covered' in d['posture'], 'missing bug_classes_covered'
 assert isinstance(d['posture']['bug_classes_covered'], list)
-# Stronger assertion: cf1 must be in covered after shim-enable
-assert 'cf1' in d['posture']['bug_classes_covered'], \
-    'cf1 not in bug_classes_covered after shim-enable: ' + \
-    str(d['posture']['bug_classes_covered'])
 bc = d['posture'].get('bug_classes', {})
 assert set(bc.keys()) == {'cf1', 'cf2', 'dirtyfrag-esp', 'dirtyfrag-rxrpc'}, \
     'bug_classes keys mismatch: ' + str(list(bc.keys()))
+# After shim-enable, cf1 should be EITHER unreachable (applicable=false,
+# the ideal outcome) OR mitigated. Anything else means the shim isn't
+# blocking AF_ALG, which we already asserted via layers.ld_preload_shim.
+cf1 = bc['cf1']
+assert (cf1['applicable'] is False) or cf1.get('mitigated') is True, \
+    'cf1 unhardened post-shim-enable: ' + json.dumps(cf1)
 print('verdict:', d['posture']['verdict'])
 print('bug_classes_covered:', d['posture']['bug_classes_covered'])
 print('ld_preload_shim layer:', d['posture']['layers']['ld_preload_shim'])
