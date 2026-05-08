@@ -1,6 +1,6 @@
 # /etc/yum.repos.d/copyfail.repo
 #
-# DNF/YUM repository for the copyfail / afalg-defense packages.
+# DNF/YUM repository for the copyfail-defense packages (v2.0.0+).
 # Hosted on GitHub Pages; RPMs and repodata served directly by the
 # rfxn/copyfail repository.
 #
@@ -11,10 +11,14 @@
 # Install:
 #   curl -sSL https://rfxn.github.io/copyfail/copyfail.repo \
 #     | sudo tee /etc/yum.repos.d/copyfail.repo
-#   sudo dnf install -y afalg-defense
+#   sudo dnf install -y copyfail-defense
 #
 # After install, activate the LD_PRELOAD shim explicitly:
 #   sudo /usr/sbin/copyfail-shim-enable
+#
+# Upgrading from afalg-defense (v1.0.x):
+#   sudo dnf upgrade -y copyfail-defense
+#   # Obsoletes/Provides metadata performs the rename automatically.
 #
 # Signing key fingerprint (1.0.1+):
 #   6001 1CDC EA2F F52D 975A  FDEE 6D30 F32C D5E8 0F80
@@ -24,7 +28,7 @@
 # time the repo is enabled.
 
 [copyfail]
-name=copyfail / afalg-defense (EL$releasever)
+name=copyfail-defense (EL$releasever)
 baseurl=https://rfxn.github.io/copyfail/repo/$releasever/$basearch/
 enabled=1
 gpgcheck=1

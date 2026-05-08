@@ -1,37 +1,43 @@
 <div align="center">
 
-# copyfail - CVE-2026-31431
+# copyfail-defense
 
-**Local privilege escalation via the AF_ALG `authencesn` page-cache primitive.**
-The kernel mis-bounds an AEAD decrypt and writes attacker-controlled bytes
-into the page cache of any SUID binary or privileged config file.
-No file on disk changes; the corruption lives in RAM until eviction.
-No on-disk forensic artefacts.
+**Defense-in-depth toolkit for the Copy Fail Linux kernel bug class.**
+Covers three live LPE chains that share the same `splice()` →
+`MSG_SPLICE_PAGES` → in-place page-cache write primitive:
 
-Userspace defense-in-depth: an `LD_PRELOAD` shim that blocks `AF_ALG`
-socket creation and a read-only host posture auditor.
-Signed RPMs for EL8 / EL9 / EL10.
+| | CVE | Sink | Primitive |
+|---|---|---|---|
+| **cf1** | CVE-2026-31431 | `algif_aead` AEAD scratch-write | 4-byte STORE via `seqno_lo` |
+| **cf2** | (no CVE yet) | `esp_input` skip_cow | 4-byte STORE via `seq_hi` |
+| **Dirty Frag** | (embargo broken, no CVE) | `esp_input` + `rxkad_verify_packet_1` | 4-byte and 8-byte STORE |
 
-<a href="https://rfxn.github.io/copyfail/"><img src="https://img.shields.io/badge/%F0%9F%93%A6%20yum%2Fdnf%20repo-rfxn.github.io%2Fcopyfail-22d3ee?style=for-the-badge&labelColor=09090b" alt="copyfail yum/dnf package repo"></a>
+Userspace primitives stack into a single `dnf install`: an `LD_PRELOAD`
+shim, a kernel-module-entry-point cut, kernel-enforced systemd
+restrictions, and a read-only host posture auditor that reports
+per-class coverage. Signed RPMs for EL8 / EL9 / EL10.
+
+<a href="https://rfxn.github.io/copyfail/"><img src="https://img.shields.io/badge/%F0%9F%93%A6%20yum%2Fdnf%20repo-rfxn.github.io%2Fcopyfail-22d3ee?style=for-the-badge&labelColor=09090b" alt="copyfail-defense yum/dnf package repo"></a>
 <a href="https://www.rfxn.com/research/copyfail-cve-2026-31431"><img src="https://img.shields.io/badge/%F0%9F%94%AC%20deep%20dive-rfxn.com%2Fresearch-d97757?style=for-the-badge&labelColor=09090b" alt="Deep-dive research article on rfxn.com"></a>
 
-[![CVE](https://img.shields.io/badge/CVE-2026--31431-d97757?labelColor=09090b)](#what-this-protects-against)
+[![Bug class](https://img.shields.io/badge/Copy%20Fail%20bug%20class-cf1%20%2F%20cf2%20%2F%20Dirty%20Frag-d97757?labelColor=09090b)](#what-this-protects-against)
 [![Severity](https://img.shields.io/badge/severity-LOCAL%20PRIVESC-d44d4d?labelColor=09090b)](#what-this-protects-against)
 [![License](https://img.shields.io/badge/license-GPL--2.0-22d3ee?labelColor=09090b)](LICENSE)
 [![EL8/9/10](https://img.shields.io/badge/EL-8%20%2F%209%20%2F%2010-4ade80?labelColor=09090b)](https://rfxn.github.io/copyfail/)
 [![Latest release](https://img.shields.io/github/v/release/rfxn/copyfail?label=release&color=22d3ee&labelColor=09090b)](https://github.com/rfxn/copyfail/releases/latest)
 
-[Install](#install) · [Audit](#audit-the-host) · [Defense-in-depth](#defense-in-depth-where-this-rung-carries-weight-on-its-own) · [Subpackages](#subpackages) · [Verify signatures](#verifying-signatures)
+[Install](#install) · [Audit](#audit-the-host) · [Subpackages](#subpackages) · [Coverage matrix](#coverage-matrix-which-rung-stops-which-bug) · [Override paths](#override-paths-rootless-podman-ipsec-afs) · [Verify signatures](#verifying-signatures)
 
 </div>
 
 ---
 
 > [!NOTE]
-> The shim is installed but **not auto-enabled** - activation is an explicit
-> operator step (`copyfail-shim-enable`) so a broken upgrade can't brick a
-> host. The auditor is read-only by design: writes only to `mkdtemp()`
-> sentinels, never modifies `/usr/bin` or `/etc`.
+> Upgrading from `afalg-defense` v1.0.x is a single command:
+> `dnf upgrade copyfail-defense`. The `Obsoletes:`/`Provides:` chain
+> performs the rename swap automatically and pulls in the new
+> subpackages. The shim is **still not auto-enabled** — activation
+> remains an explicit operator step.
 
 ---
 
@@ -40,94 +46,65 @@ Signed RPMs for EL8 / EL9 / EL10.
 ```sh
 sudo curl -sSL https://rfxn.github.io/copyfail/copyfail.repo \
   -o /etc/yum.repos.d/copyfail.repo
-sudo dnf install -y afalg-defense
+sudo dnf install -y copyfail-defense
+sudo /usr/sbin/copyfail-shim-enable
 ```
 
-One repo file works on EL8/EL9/EL10 (dnf substitutes `$releasever`/`$basearch`
-per host). RPMs are GPG-signed; dnf imports the public key on first use
-— cross-check the fingerprint when prompted:
+One repo file works on EL8/EL9/EL10. RPMs are GPG-signed; dnf imports
+the public key on first use — cross-check the fingerprint when prompted:
 
 ```
 6001 1CDC EA2F F52D 975A  FDEE 6D30 F32C D5E8 0F80
 ```
 
+The meta package pulls four subpackages:
+
+| Subpackage | Coverage |
+|---|---|
+| `copyfail-defense-shim` | LD_PRELOAD AF_ALG block (cf1 primary) |
+| `copyfail-defense-modprobe` | kernel-module entry-point cuts (cf1 + cf2 + Dirty Frag) |
+| `copyfail-defense-systemd` | per-unit `RestrictAddressFamilies=~AF_ALG ~AF_RXRPC` + `RestrictNamespaces=~user ~net` (all three classes) |
+| `copyfail-defense-auditor` | read-only host posture auditor with per-class coverage report |
+
 Auditor only (no `LD_PRELOAD`, for hot infrastructure):
 
 ```sh
-sudo dnf install -y afalg-defense-auditor
+sudo dnf install -y copyfail-defense-auditor
 ```
-
-## Activate the shim
-
-The shim is installed but **not auto-enabled**. Wiring
-`/etc/ld.so.preload` from a `%post` would brick the host on any broken
-upgrade — activation is an explicit operator step:
-
-```sh
-sudo /usr/sbin/copyfail-shim-enable      # smoke-tests, then writes /etc/ld.so.preload
-sudo /usr/sbin/copyfail-shim-disable     # reverses it
-```
-
-The enable helper does `LD_PRELOAD=$shim /bin/true` first; if the .so
-cannot be loaded the helper refuses to update the file rather than risk
-locking you out.
-
-## Also blacklist the AF_ALG modules (where loadable)
-
-The package also ships an equally low-barrier mitigation: a `modprobe`
-drop-in that severs `algif_aead`, `authenc`, and `authencesn` at the
-kernel level. When your kernel exposes AF_ALG as a loadable module —
-most stock mainline kernels do — this **stacks with the shim** and
-deserves equal weight. The shim blocks every userspace caller at libc;
-the blacklist removes the kernel attack surface entirely. Different
-mechanisms, both one-line operator actions.
-
-```sh
-# Decide whether the blacklist will be effective on this kernel.
-ls /sys/module/algif_aead 2>/dev/null && echo "modular - blacklist effective" \
-    || echo "builtin or absent - shim is your primary defense"
-grep -E 'ALG_USERMODE|CRYPTO_USER_API' /boot/config-$(uname -r) 2>/dev/null
-# =m -> modular (blacklist is primary)   =y -> builtin (shim is primary)
-
-# If it's modular, drop a blacklist into /etc/modprobe.d/ and unload
-# anything already resident. The CVE-2026-31431 chain is the trio at
-# the bottom; the algif_* family is added for general AF_ALG hygiene.
-sudo tee /etc/modprobe.d/99-no-afalg.conf >/dev/null <<'EOF'
-install af_alg          /bin/false
-install algif_aead      /bin/false
-install algif_skcipher  /bin/false
-install algif_hash      /bin/false
-install algif_rng       /bin/false
-install authenc         /bin/false
-install authencesn      /bin/false
-EOF
-sudo rmmod algif_aead authenc authencesn 2>/dev/null || true
-```
-
-(The package also ships this file under
-`/usr/share/doc/afalg-defense/examples/no-afalg-modprobe.conf` — same
-content, copy that into place if you prefer the audit trail.) Where
-your kernel allows it, deploy **both** the shim and the blacklist —
-belt-and-suspenders coverage for the price of two `sudo` commands.
 
 ## Verify
 
+After install + activation:
+
 ```sh
+# cf1 — AF_ALG socket creation should fail
 python3 -c 'import socket; socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)'
 # expect: PermissionError [Errno 1] Operation not permitted
+
+# Holistic per-class coverage report
+sudo copyfail-local-check
 ```
 
-Blocked attempts log to `auth.priv`:
+The auditor renders a surface-area matrix at the bottom showing, per
+bug-class, whether the kernel sink is reachable on this host AND which
+mitigation layers are active:
 
 ```
-no-afalg[12345]: blocked AF_ALG (domain=38) via socket uid=0 euid=0 pid=12345
+Surface area / mitigation matrix:
+  Class                Sink reachable?  Mitigated?  Active layers
+  cf1 (CVE-2026-31431) YES              yes         ld_preload_shim, systemd_af_alg, modprobe_blacklist
+  cf2 (xfrm-ESP)       YES              yes         modprobe_blacklist, systemd_restrict_ns
+  Dirty Frag-ESP       YES              yes         modprobe_blacklist, systemd_restrict_ns
+  Dirty Frag-RxRPC     YES              yes         modprobe_blacklist, systemd_af_rxrpc
+
+Bug-class coverage: cf1=mitigated cf2=mitigated dirtyfrag-esp=mitigated dirtyfrag-rxrpc=mitigated
 ```
 
 ## Audit the host
 
 ```sh
 sudo copyfail-local-check                # human-readable, only flags non-OK
-sudo copyfail-local-check --json         # SIEM ingestion (posture.verdict)
+sudo copyfail-local-check --json         # SIEM ingestion (posture.bug_classes_covered)
 sudo copyfail-local-check --emit-remediation   # bash script of suggested fixes
 ```
 
@@ -136,89 +113,96 @@ Read-only by design: writes only to `mkdtemp()` sentinels, never modifies
 without root). Five categories: `ENV`, `KERNEL`, `MITIGATION`,
 `HARDENING`, `DETECTION`.
 
-Exit codes: `0` clean · `2` **VULN** (no userspace mitigation) ·
-`3` VULN-but-mitigated · `4` hardening recommendations only.
+Exit codes (unchanged from v1.0.1): `0` clean · `2` **VULN**
+(no userspace mitigation) · `3` VULN-but-mitigated · `4` hardening
+recommendations only.
+
+JSON output (`--json`) includes:
+- `posture.bug_classes_covered` — array of class IDs where mitigation is
+  active (single SIEM filter for "is this host hardened against the cf
+  class?")
+- `posture.bug_classes` — per-class map with `applicable`, `mitigated`,
+  `kernel_sink`, and per-layer activation booleans for dashboards
+- `posture.verdict` — headline string from v1.0.x (preserved for
+  backwards compat)
 
 ## Remove
 
 ```sh
 sudo /usr/sbin/copyfail-shim-disable
-sudo dnf remove afalg-defense afalg-defense-shim afalg-defense-auditor
+sudo dnf remove copyfail-defense
 ```
 
-`%preun` also scrubs `/etc/ld.so.preload` on full erase as a safety
-net, but disabling first keeps the operation transparent.
+`%preun` scrubs `/etc/ld.so.preload` on full erase as a safety net,
+and the modprobe drop file is removed; `%config(noreplace)` means the
+operator's hand-edits to systemd drop-ins survive package upgrade.
+
+---
+
+## Coverage matrix: which rung stops which bug
+
+| Rung | cf1 | cf2 | Dirty Frag-ESP | Dirty Frag-RxRPC |
+|---|:---:|:---:|:---:|:---:|
+| LD_PRELOAD shim (cf1 AF_ALG hook) | ✅ primary | – | – | (incidental — public PoC's cksum step) |
+| modprobe blacklist `algif_aead` family | (no-op on RHEL builtin) | – | – | – |
+| modprobe blacklist `esp4`/`esp6`/`xfrm_user`/`xfrm_algo` | – | ✅ | ✅ | – |
+| modprobe blacklist `rxrpc` | – | – | – | ✅ |
+| systemd `RestrictAddressFamilies=~AF_ALG` (kernel-enforced) | ✅ | – | – | – |
+| systemd `RestrictAddressFamilies=~AF_RXRPC` | – | – | – | ✅ |
+| systemd `RestrictNamespaces=~user ~net` | – | ✅ | ✅ | – |
+| Suid lockdown `chmod 4750 /usr/bin/su` | – | ✅ (target) | ✅ (target) | – |
+| Page-cache integrity probe | (cached IOC) | (cached IOC) | (cached IOC) | (cached IOC) |
+| Audit telemetry | `socket(a0=38)` | `unshare(NEWUSER)` | `unshare(NEWUSER)` | `add_key("rxrpc",...)` |
+| Kernel patch | `a664bf3d` (cf1) | `f4c50a4034` (cf2) | `f4c50a4034` (df-ESP) | none upstream |
+
+> 🔬 **Full writeup:** [Copy Fail (CVE-2026-31431) — rfxn.com/research](https://www.rfxn.com/research/copyfail-cve-2026-31431)
+> covers the kernel-level mechanics for cf1; the cf2 + Dirty Frag
+> sections extend it to the broader bug class.
 
 ---
 
 ## What this protects against
 
-> 🔬 **Full writeup:** [Copy Fail (CVE-2026-31431) — rfxn.com/research](https://www.rfxn.com/research/copyfail-cve-2026-31431)
-> covers the kernel-level mechanics, exploit primitives, and why the
-> userspace shim closes the practical attacker windows. Brief
-> summary below.
+The Copy Fail bug **class** is a deterministic page-cache-write
+primitive: an unprivileged process uses `splice()` to plant a
+read-only page-cache page (e.g., `/etc/passwd` or `/usr/bin/su`)
+into a sender skb's `frag` slot, the receiver path performs in-place
+crypto on top of that frag, and the resulting STORE writes
+attacker-controlled bytes into the page cache. The on-disk file is
+unchanged; the corruption lives in RAM until eviction.
 
-`AF_ALG`'s `authencesn(hmac(sha256),cbc(aes))` AEAD path miscomputes
-output length on decrypt, returning more bytes to userspace than were
-actually authenticated. When the destination of that decrypt is a pipe
-spliced from the page cache of a SUID binary or privileged config file,
-the kernel writes attacker-controlled bytes into clean page-cache
-pages — visible to every subsequent reader, including `execve()` of
-`/usr/bin/su`. **No file on disk is changed**; the corruption lives in
-RAM until pages are evicted.
+| | Kernel sink | Privilege needed | Module |
+|---|---|---|---|
+| **cf1** (CVE-2026-31431) | `algif_aead` AEAD scratch-write | none | `algif_aead` (RHEL: builtin) |
+| **cf2** ("Electric Boogaloo") | `esp_input` `skip_cow` path | `CAP_NET_ADMIN` via `unshare(NEWUSER\|NEWNET)` | `esp4`, `xfrm_user` (RHEL: modules) |
+| **Dirty Frag-ESP** | same as cf2 | same as cf2 | same as cf2 |
+| **Dirty Frag-RxRPC** | `rxkad_verify_packet_1` in-place `pcbc(fcrypt)` | **none** | `rxrpc` (Ubuntu: loaded; RHEL: not in core) |
 
-The result is a local privilege-escalation primitive that does not
-require a kernel module to be loaded by the attacker (the relevant
-crypto modules are auto-loaded by `socket(AF_ALG, ...)` itself on most
-distributions) and that **leaves no on-disk forensic artefacts**.
+The same primitive shape, three different kernel sinks. Every layer in
+this toolkit is independently useful — none of them is a silver bullet
+on its own.
 
-## Defense-in-depth: where this rung carries weight on its own
+---
 
-There are five layers of defense for AF_ALG-class bugs, and every one
-has failure modes. The point of this package is that the conditions
-that defeat the rungs above it are **not the same conditions that
-defeat the shim** — which is what makes the shim a viable primary
-defense, not just a backup.
+## Defense-in-depth: why each rung carries weight
 
-| Rung | Where it fails | What the shim does there |
+Each rung defeats the bug by a **different mechanism**, so an attack
+that defeats one doesn't necessarily defeat the next:
+
+| Rung | Where it fails | What the next rung covers |
 |---|---|---|
-| 1. Kernel patch (vendor) | EL7 is EOL; EL8/EL9/EL10 patch rollout lags disclosure by days to weeks; production reboot may not be available in the window the bug is hot | **Closes the window without a reboot.** Live install, no kernel touch |
-| 2. `modprobe` blacklist of `algif_aead` / `authenc` / `authencesn` | Only when these are loaded as **modules** (not builtin) — and not already resident from earlier in boot. **On modular kernels (most stock mainline), this is an equally low-barrier primary defense** that stacks with the shim. Becomes a no-op when `algif_aead` is builtin (the RHEL default) | **Picks up the slack on builtin-crypto kernels** — every userspace caller still goes through libc `socket(2)` regardless of how the kernel exposed AF_ALG |
-| 3. systemd `RestrictAddressFamilies=~AF_ALG` | Reaches only services systemd starts post-restriction. Misses **cron jobs, sshd login shells, container payloads with their own pid 1**, anything pre-restriction | **Global.** `/etc/ld.so.preload` applies to every dynamic-linked process regardless of which init started it |
-| 4. **`LD_PRELOAD` shim (this package)** | Static binaries; processes issuing the `syscall` instruction directly; SUID binaries (kernel strips `LD_PRELOAD` for secure-exec) | (see right column for coverage scope) |
-| 5. seccomp filter (per-unit / container-runtime) | Per-service. Operationally heavy: each unit/runtime needs an explicit policy | **One .so + one ld.so.preload line** covers the whole host |
+| **Kernel patch (vendor)** | EL7 EOL; EL8/9/10 patch rollout lags disclosure days-to-weeks; production reboot may not be available; **Dirty Frag-RxRPC has no upstream patch** | Userspace cuts close the window without a reboot |
+| **modprobe blacklist** | No-op when the relevant module is **builtin** (RHEL `algif_aead` is); no effect on already-resident modules | Functional for `esp4`/`esp6`/`xfrm_user`/`xfrm_algo`/`rxrpc` on stock RHEL kernels (these are modules) |
+| **systemd `RestrictAddressFamilies`/`RestrictNamespaces`** | Reaches only services systemd starts post-restriction. Misses cron-jobs running as root, sshd-pre-restriction, container payloads with their own pid 1 | LD_PRELOAD shim covers every dyn-linked process regardless of init |
+| **LD_PRELOAD shim** | Static binaries; processes issuing `syscall` instruction directly; SUID binaries (kernel strips LD_PRELOAD for secure-exec) | seccomp at unit/runtime level catches direct-syscall path |
+| **seccomp filter** | Per-service. Operationally heavy: each unit/runtime needs explicit policy | This package's systemd subpackage ships a one-line filter for the highest-leverage tenant units |
 
 Where the shim itself fails — static binaries, direct `syscall`
 instruction, SUID stripping — is **attacker engineering territory**.
 The other rungs fail under **routine operator reality**: vendors
 haven't shipped yet, the kernel was built with builtin crypto, the
 threat surface includes a cron job. That asymmetry is the case for
-deploying this rung first.
-
-### When this is your primary defense
-
-- The vendor kernel patch isn't out yet (zero-day window).
-- It is out, but you can't reboot the host *right now*.
-- The kernel has `algif_aead` builtin (so `modprobe` blacklist is a
-  no-op).
-- Your threat surface includes anything outside systemd — cron, login
-  shells, container payloads, anything inheriting from a
-  pre-restriction unit.
-- You don't have the operational bandwidth to write per-service
-  seccomp policy for every daemon.
-
-The auditor scores all five rungs against the running host and tells
-you which are present, stale, or bypassable — so you can layer
-additional defenses as they become available without losing track of
-what's actually load-bearing right now.
-
-## What the shim deliberately does NOT do
-
-It does not wrap `syscall(2)`. Reading six `long` varargs unconditionally
-is undefined behaviour, and the bypasses it would catch
-(`syscall(SYS_socket, AF_ALG, ...)` and inline-asm `syscall` instruction)
-are unblockable from userspace anyway. Pair with seccomp or the kernel
-patch for that surface.
+deploying every rung this package ships.
 
 ---
 
@@ -226,9 +210,11 @@ patch for that surface.
 
 | Package | Arch | Contents |
 |---|---|---|
-| `afalg-defense` | x86_64 | meta — pulls shim + auditor |
-| `afalg-defense-shim` | x86_64 | `/usr/lib64/no-afalg.so` + `copyfail-shim-{enable,disable}` |
-| `afalg-defense-auditor` | noarch | `/usr/sbin/copyfail-local-check` (Python, stdlib-only, read-only) |
+| `copyfail-defense` | x86_64 | meta — pulls all four below |
+| `copyfail-defense-shim` | x86_64 | `/usr/lib64/no-afalg.so` + `copyfail-shim-{enable,disable}` |
+| `copyfail-defense-modprobe` | noarch | `/etc/modprobe.d/99-copyfail-defense.conf` (cf-class entry-point cuts) |
+| `copyfail-defense-systemd` | noarch | drop-ins for `user@`/`sshd`/`cron`/`crond`/`atd` + container-runtime examples |
+| `copyfail-defense-auditor` | noarch | `/usr/sbin/copyfail-local-check` (Python, stdlib-only, read-only) |
 
 Per-EL binary RPMs are independently compiled against each
 distribution's glibc (EL8: 2.28 with split `libdl`; EL9/EL10: 2.34+
@@ -236,9 +222,64 @@ with merged `libdl`). **Do not cross-install across ELs.** Direct
 download links + sha256s:
 [rfxn.github.io/copyfail](https://rfxn.github.io/copyfail/#direct-downloads).
 
+---
+
+## Override paths: rootless podman, IPsec, AFS
+
+The default install applies `RestrictNamespaces=~user ~net` to
+`user@.service` (and other tenant units). This **breaks rootless
+podman/buildah** under `user@.service`. To opt out per-unit:
+
+```sh
+sudo install -d /etc/systemd/system/user@.service.d
+sudo tee /etc/systemd/system/user@.service.d/20-override.conf >/dev/null <<'EOF'
+[Service]
+RestrictNamespaces=
+RestrictAddressFamilies=
+EOF
+sudo systemctl daemon-reload
+```
+
+The `99-` prefix on the modprobe drop and the `10-` prefix on systemd
+drop-ins are deliberate: any `20-*.conf` drop-in you add overrides
+ours.
+
+If your fleet legitimately uses **IPsec** (strongSwan, libreswan,
+FRRouting), the modprobe subpackage's blacklist of `esp4`/`esp6`/
+`xfrm_user`/`xfrm_algo` will break those workloads. Either skip the
+modprobe subpackage:
+
+```sh
+sudo dnf install copyfail-defense-shim copyfail-defense-systemd \
+                 copyfail-defense-auditor
+# (omit copyfail-defense and copyfail-defense-modprobe)
+```
+
+…or remove the relevant entries from `/etc/modprobe.d/99-copyfail-defense.conf`
+(the file is `%config(noreplace)`, so your edit survives package upgrade).
+
+Same logic for **AFS** (`openafs`, `kafs`) and the `rxrpc` blacklist line.
+
+If your fleet runs **rootless or userns-remapped containers** under
+`containerd`/`docker`/`podman` service units, the default install does
+NOT touch those — by design. Container-runtime drop-ins ship as
+opt-in examples under `/usr/share/doc/copyfail-defense/examples/` for
+operators who have confirmed no rootless workloads:
+
+```sh
+for u in containerd docker podman; do
+    sudo install -d /etc/systemd/system/${u}.service.d
+    sudo cp /usr/share/doc/copyfail-defense/examples/containers-dropin.conf \
+            /etc/systemd/system/${u}.service.d/10-copyfail-defense.conf
+done
+sudo systemctl daemon-reload
+```
+
+---
+
 ## Verifying signatures
 
-1.0.1 and later are signed by the **Copyfail Project Signing Key**.
+1.0.1+ and 2.0.0+ are signed by the **Copyfail Project Signing Key**.
 The `.repo` file enforces both `gpgcheck=1` (per-RPM) and
 `repo_gpgcheck=1` (detached `repomd.xml.asc` over the metadata) — so a
 stock `dnf install` does end-to-end verification automatically.
@@ -249,73 +290,49 @@ uid:         Copyfail Project Signing Key <proj@rfxn.com>
 key file:    https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail
 ```
 
-Out-of-band:
+Out-of-band verification of a downloaded RPM:
 
 ```sh
 curl -sSL https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail \
   | sudo rpm --import /dev/stdin
-rpm -K afalg-defense-1.0.1-1.el9.x86_64.rpm
+rpm -K copyfail-defense-2.0.0-1.el9.x86_64.rpm
 # expect: digests signatures OK
 ```
 
-## Auditor JSON schema
+---
 
-`--json` emits a structured object SIEMs/dashboards can ingest
-directly. The headline is `posture.verdict`; consume that, not the
-human report.
+## Auditor JSON schema (v2.0)
+
+`--json` emits a structured object. The headline fields:
 
 ```json
 {
+  "schema_version": "2.0",
+  "covers": ["CVE-2026-31431", "cf2-xfrm-esp", "dirtyfrag-esp", "dirtyfrag-rxrpc"],
   "posture": {
     "verdict": "vulnerable_kernel_userspace_mitigated",
-    "layers": {
-      "kernel_patched":      "missing",
-      "af_alg_unreachable":  "missing",
-      "modprobe_blacklist":  "missing",
-      "ld_preload_shim":     "ok",
-      "systemd_restriction": "missing",
-      "user_service_dropin": "missing",
-      "seccomp_runtime":     "skipped",
-      "auditd_running":      "ok",
-      "audit_rule_af_alg":   "ok"
-    }
+    "bug_classes_covered": ["cf1", "cf2", "dirtyfrag-esp"],
+    "bug_classes": {
+      "cf1":             { "applicable": true, "mitigated": true,  "kernel_sink": "...", "layers": {...} },
+      "cf2":             { "applicable": true, "mitigated": true,  "kernel_sink": "...", "layers": {...} },
+      "dirtyfrag-esp":   { "applicable": true, "mitigated": true,  "kernel_sink": "...", "layers": {...} },
+      "dirtyfrag-rxrpc": { "applicable": true, "mitigated": false, "kernel_sink": "...", "layers": {...} }
+    },
+    "layers": { ... }
   }
 }
 ```
 
-`verdict` is one of: `patched`, `kernel_likely_safe`, `inconclusive`,
-`vulnerable_kernel_userspace_mitigated`, `vulnerable`. Designed so a
-fleet console can render a per-host posture row without re-implementing
-verdict logic over the raw checks.
+`bug_classes_covered` is the SIEM-ergonomic single filter ("is this
+host hardened?"). `bug_classes` map exposes per-layer breakdown for
+finer dashboards. `verdict` and `layers` from v1.0.x are preserved for
+backwards compatibility.
 
-`--emit-remediation` prints a bash script aggregating the per-check
+`--emit-remediation` prints a bash script aggregating per-check
 remediation hints. Output is **fully commented** by default; review
-every block before pasting (chmod on suid binaries, `modules_disabled`
-sysctl, modprobe blacklist are policy-dependent or require a reboot to
+every block before pasting (chmod on suid binaries, modprobe blacklist,
+unprivileged-userns sysctl are policy-dependent or require a reboot to
 undo).
-
-## Why these checks?
-
-The auditor is structured by attack-chain layer, not by checklist
-convenience. Each category answers a specific question about the host:
-
-- **`KERNEL`** — is the primitive actually reachable?
-  AF_ALG socket open, cipher availability, `algif_aead` setsockopt,
-  live trigger probe (only check that produces a definitive `VULN`).
-- **`MITIGATION`** — if the kernel is vulnerable, is anything stopping
-  the bug? `/etc/ld.so.preload` content, shim live-block test,
-  `modprobe` blacklist, `/proc/modules` ground truth, systemd
-  `RestrictAddressFamilies`, drop-in freshness vs running daemon,
-  seccomp filter status.
-- **`HARDENING`** — if mitigation fails, what is the blast radius?
-  SUID inventory, page-cache vs `O_DIRECT` integrity sample (stable
-  divergence is a potential IOC), `getcap -r` for non-SUID privilege.
-- **`DETECTION`** — would we know if someone tried? `auditd` running
-  with rules covering `socket(38)`, recent IOC signals in
-  `auth.priv` and `audit.log`.
-- **`ENV`** — context: kernel, distro, glibc, root status. Surfaces
-  "skip" reasons up front so an unhelpful run doesn't look like a clean
-  run.
 
 ---
 
@@ -328,33 +345,41 @@ glibc 2.34), and EL10 (gcc 14 / glibc 2.39). x86_64 only.
 ```sh
 gcc -shared -fPIC -O2 -Wall -Wextra \
     -o /usr/lib64/no-afalg.so no-afalg.c -ldl
-echo /usr/lib64/no-afalg.so > /etc/ld.so.preload
 ```
 
 To rebuild the RPMs from the published SRPM (under your own signing):
 
 ```sh
 mock -r centos-stream+epel-9-x86_64 --rebuild \
-  https://github.com/rfxn/copyfail/releases/download/v1.0.1/afalg-defense-1.0.1-1.el9.src.rpm
+  https://github.com/rfxn/copyfail/releases/download/v2.0.0/copyfail-defense-2.0.0-1.el9.src.rpm
 ```
 
-The spec lives at `packaging/afalg-defense.spec`.
+The spec lives at `packaging/copyfail-defense.spec`.
+
+---
 
 ## Limitations
 
-- **x86_64 only.** The `AF_ALG` constant is universal but the
-  `LD_PRELOAD` shim has architecture asserts and the trigger probe's
-  struct layout is tested only on x86_64. Patches welcome for arm64.
+- **x86_64 only.** The shim has architecture asserts; the auditor's
+  trigger probe struct layout is x86_64. Patches welcome for arm64.
 - The userspace shim is irrelevant to static binaries and
-  syscall-instruction issuers (see "What the shim deliberately does
-  NOT do" above).
-- `modprobe` blacklists do not unload already-resident modules. If
-  `/proc/modules` shows them present after a blacklist edit, you need
-  a reboot or `rmmod`.
-- The auditor's trigger probe is destructive *only* against its own
+  syscall-instruction issuers. Other rungs (modprobe, systemd
+  RestrictNamespaces, kernel patch) cover those.
+- **Dirty Frag-RxRPC has no upstream patch** as of v2.0.0 ship date.
+  Mitigation is the `rxrpc` modprobe blacklist + systemd
+  `RestrictAddressFamilies=~AF_RXRPC` until upstream merges V4bel's
+  proposed gate (`skb_cloned(skb) || skb->data_len`).
+- modprobe blacklists do not unload already-resident modules. The
+  package's `%post modprobe` does a best-effort `rmmod`; reboot to
+  fully clear.
+- Auditor's trigger probe is destructive *only* against its own
   sentinel — it will not corrupt anything you would notice. It will,
-  however, briefly load `algif_aead` and friends if they aren't already
-  loaded (which is the point).
+  however, briefly load `algif_aead` and friends if they aren't
+  already loaded (which is the point).
+- `auditd` rules (cf_userns, cf_addkey) are **emitted by
+  `--emit-remediation`, not installed by the package**. Auditd
+  rules cause unnecessary alerting on hosts where auditd is not
+  tuned for them; operator action required.
 
 ## License
 

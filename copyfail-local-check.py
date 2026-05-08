@@ -8,11 +8,16 @@
 ##
 #
 """
-copyfail_checker.py - comprehensive CVE-2026-31431 ("Copy Fail") auditor.
+copyfail-local-check.py - comprehensive Copy Fail bug-class auditor.
 
-Combines the kernel-level vulnerability probe (after rootsecdev/test_cve_2026_31431.py)
-with mitigation, hardening, and detection-readiness checks suitable for fleet
-auditing across RHEL/CentOS/Alma/Rocky 7-10.
+Covers the full cf-class:
+  cf1 (CVE-2026-31431) - algif_aead AEAD scratch-write
+  cf2 ("Electric Boogaloo") - xfrm-ESP skip_cow path
+  Dirty Frag - xfrm-ESP and RxRPC pcbc(fcrypt) on splice'd frag
+
+Five scoring layers (ENV, KERNEL, MITIGATION, HARDENING, DETECTION) suitable
+for fleet auditing across RHEL/CentOS/Alma/Rocky 8-10 (and Debian/Ubuntu
+where applicable - apparmor userns posture is detected).
 
 SAFE BY DESIGN
   - Only writes to mkdtemp() sentinel files; never touches /usr/bin or /etc.
@@ -35,6 +40,11 @@ EXIT CODES
   2 - VULNERABLE (trigger probe confirmed, no userspace mitigation)
   3 - vulnerable kernel but at least one userspace mitigation active
   4 - mitigation/hardening gaps (not actively exploitable as observed)
+
+JSON OUTPUT (--json)
+  Includes posture.bug_classes_covered (array of mitigated class IDs for
+  SIEM filtering) and posture.bug_classes (per-class boolean map for
+  finer-grained dashboards). See README.md for schema.
 """
 
 import argparse
@@ -106,7 +116,12 @@ CRYPTLEN = 16
 TAGLEN   = 16
 MARKER   = b"PWND"
 
-# Privilege-sensitive files where page-cache corruption = privesc
+# Privilege-sensitive files where page-cache corruption = privesc.
+# v2.0.0: extended for cf2/dirtyfrag-ESP target /usr/bin/su (Theori PoC
+# overwrites first 192 bytes with a static root-shell ELF) and the PAM
+# stacks dirtyfrag-RxRPC manipulates (nullok auth bypass after
+# /etc/passwd corruption). Per Sysdig + Ventura Systems deep-dives, the
+# dynamic linker and ld.so.preload are also viable cf-class targets.
 PRIV_CONFIG_FILES = [
     "/etc/passwd",
     "/etc/group",
@@ -115,10 +130,30 @@ PRIV_CONFIG_FILES = [
     "/etc/pam.d/su",
     "/etc/pam.d/sshd",
     "/etc/pam.d/login",
+    "/etc/pam.d/system-auth",
+    "/etc/pam.d/password-auth",
+    "/etc/pam.d/common-auth",
     "/etc/nsswitch.conf",
     "/etc/ssh/sshd_config",
+    "/etc/ld.so.preload",
+    "/usr/bin/su",
+    "/lib64/ld-linux-x86-64.so.2",
 ]
 PRIV_CONFIG_ROOT_FILES = ["/etc/shadow", "/etc/gshadow"]
+
+# v2.0.0: cf-class kernel-module entry-points the modprobe subpackage
+# should cover. Used by check_modprobe_blacklist_extended.
+CF_CLASS_MODULES = [
+    "algif_aead", "authenc", "authencesn", "af_alg",      # cf1
+    "esp4", "esp6", "xfrm_user", "xfrm_algo",             # cf2 / dirtyfrag-ESP
+    "rxrpc",                                              # dirtyfrag-RxRPC
+]
+
+# v2.0.0: tenant-facing systemd units that should carry the cf-class
+# RestrictAddressFamilies + RestrictNamespaces drop-in.
+CF_CLASS_TENANT_UNITS = ["sshd", "user@", "cron", "crond", "atd"]
+# Optional opt-in units (container runtimes — INFO not WARN if missing).
+CF_CLASS_OPTIONAL_UNITS = ["containerd", "docker", "podman"]
 
 # --- Color/output ----------------------------------------------------------
 
@@ -1244,6 +1279,596 @@ def check_recent_ioc_signals():
                      len(sources_seen)),
                  details={"sources": sources_seen})
 
+# --- v2.0.0 cf-class extensions -------------------------------------------
+# Below: new check functions added in v2.0.0 to cover cf2 (xfrm-ESP) and
+# Dirty Frag (xfrm-ESP + RxRPC). All follow the existing pattern: return a
+# Check or list[Check]; never raise into the caller; stdlib-only.
+
+def _module_state(name):
+    """Classify a kernel module: 'loaded', 'builtin', 'modular', 'absent'."""
+    # /sys/module/<name> exists if loaded OR builtin
+    sys_path = "/sys/module/" + name
+    if os.path.isdir(sys_path):
+        # Built-in modules don't have a refcnt file; loaded modules do.
+        if os.path.exists(sys_path + "/refcnt") or \
+           os.path.exists(sys_path + "/holders"):
+            return "loaded"
+        return "builtin"
+    # Not loaded; check if loadable
+    rel = os.uname().release
+    for base in ("/lib/modules/" + rel, "/usr/lib/modules/" + rel):
+        if not os.path.isdir(base):
+            continue
+        # modules.dep is the canonical source; cheap to grep
+        dep = base + "/modules.dep"
+        if os.path.isfile(dep):
+            text = read_text_safe(dep, max_bytes=1 << 20) or ""
+            for line in text.splitlines():
+                # entry: kernel/.../foo.ko: deps...
+                stem = line.split(":", 1)[0]
+                bn = os.path.basename(stem)
+                if bn.startswith(name + "."):
+                    return "modular"
+    return "absent"
+
+def check_xfrm_modules():
+    """cf2 / Dirty Frag-ESP: report on the xfrm-ESP entry-point modules."""
+    states = {m: _module_state(m) for m in
+              ("esp4", "esp6", "xfrm_user", "xfrm_algo")}
+    loaded = [m for m, s in states.items() if s == "loaded"]
+    modular = [m for m, s in states.items() if s == "modular"]
+    builtin = [m for m, s in states.items() if s == "builtin"]
+    if loaded:
+        return Check("xfrm_modules", "KERNEL", Status.WARN,
+                     "xfrm-ESP modules currently loaded: {}".format(
+                         ", ".join(loaded)),
+                     details=states,
+                     remediation="rmmod {}".format(" ".join(loaded)) +
+                                 " (and add to /etc/modprobe.d/99-copyfail-defense.conf "
+                                 "to prevent reload).")
+    if modular:
+        return Check("xfrm_modules", "KERNEL", Status.INFO,
+                     "xfrm-ESP modules loadable but not loaded: {}".format(
+                         ", ".join(modular)),
+                     details=states)
+    if builtin:
+        return Check("xfrm_modules", "KERNEL", Status.WARN,
+                     "xfrm-ESP modules built into kernel: {}".format(
+                         ", ".join(builtin)),
+                     details=states,
+                     remediation="kernel-rebuild required to remove; rely on "
+                                 "systemd RestrictNamespaces=~user ~net to cut "
+                                 "the unshare path instead.")
+    return Check("xfrm_modules", "KERNEL", Status.OK,
+                 "xfrm-ESP modules absent or unbuildable on this kernel",
+                 details=states)
+
+def check_rxrpc_module():
+    """Dirty Frag-RxRPC: report on rxrpc.ko reachability."""
+    state = _module_state("rxrpc")
+    # /proc/net/protocols is the canonical "is the protocol family
+    # registered?" check - avoids socket() autoload side-effect.
+    proto_text = read_text_safe("/proc/net/protocols") or ""
+    rxrpc_registered = bool(re.search(r"^RXRPC\b", proto_text, re.MULTILINE))
+    details = {"module_state": state, "protocol_registered": rxrpc_registered}
+    if state == "loaded" or rxrpc_registered:
+        return Check("rxrpc_module", "KERNEL", Status.WARN,
+                     "rxrpc module loaded / protocol registered "
+                     "(dirtyfrag-RxRPC reachable)",
+                     details=details,
+                     remediation="rmmod rxrpc && add to "
+                                 "/etc/modprobe.d/99-copyfail-defense.conf")
+    if state == "modular":
+        return Check("rxrpc_module", "KERNEL", Status.INFO,
+                     "rxrpc loadable but not loaded "
+                     "(may auto-load on socket(AF_RXRPC, ...) call)",
+                     details=details)
+    if state == "builtin":
+        return Check("rxrpc_module", "KERNEL", Status.WARN,
+                     "rxrpc built into kernel (dirtyfrag-RxRPC reachable)",
+                     details=details)
+    return Check("rxrpc_module", "KERNEL", Status.OK,
+                 "rxrpc absent and unbuildable on this kernel",
+                 details=details)
+
+def check_modprobe_blacklist_extended():
+    """v2.0.0: aggregate modprobe coverage across the full cf-class list."""
+    pat = re.compile(
+        r"^\s*(install|blacklist)\s+(\S+)\b", re.MULTILINE)
+    paths = (glob.glob("/etc/modprobe.d/*.conf") +
+             glob.glob("/usr/lib/modprobe.d/*.conf") +
+             glob.glob("/lib/modprobe.d/*.conf"))
+    covered = set()
+    for path in paths:
+        text = read_text_safe(path) or ""
+        for m in pat.finditer(text):
+            mod = m.group(2)
+            if mod in CF_CLASS_MODULES:
+                covered.add(mod)
+    missing = [m for m in CF_CLASS_MODULES if m not in covered]
+    if not missing:
+        return Check("modprobe_extended", "MITIGATION", Status.OK,
+                     "all {} cf-class entry-point modules blacklisted".format(
+                         len(CF_CLASS_MODULES)),
+                     details={"covered": sorted(covered)})
+    return Check("modprobe_extended", "MITIGATION", Status.WARN,
+                 "{} cf-class modules not blacklisted: {}".format(
+                     len(missing), ", ".join(missing)),
+                 details={"covered": sorted(covered),
+                          "missing": missing},
+                 remediation="Install copyfail-defense-modprobe, OR write "
+                             "/etc/modprobe.d/99-copyfail-defense.conf with "
+                             "'install <mod> /bin/false' for each missing.")
+
+def _unit_namespaces_blocked(rn_value):
+    """Returns True if RestrictNamespaces blocks BOTH user and net.
+
+    systemd semantics:
+      RestrictNamespaces=~user net   -> deny-list; user and net denied
+      RestrictNamespaces=user net    -> allow-list; only user/net allowed (rare)
+      RestrictNamespaces=yes/no      -> blanket deny/allow (rare)
+    The cf2/dirtyfrag-ESP exploit needs unshare(CLONE_NEWUSER|CLONE_NEWNET);
+    cutting either kills the chain. We require BOTH to flag OK."""
+    if not rn_value:
+        return False
+    rn = rn_value.strip()
+    if rn in ("yes", "true", "1"):
+        return True  # blanket deny-all
+    if rn in ("no", "false", "0", ""):
+        return False
+    if rn.startswith("~"):
+        # deny-list: user AND net must be in the list
+        body = rn[1:]
+        toks = re.split(r"[\s,]+", body)
+        return "user" in toks and "net" in toks
+    # allow-list: user AND net must be ABSENT
+    toks = re.split(r"[\s,]+", rn)
+    return "user" not in toks and "net" not in toks
+
+def check_systemd_restrict_namespaces():
+    """v2.0.0: per-unit RestrictNamespaces coverage for cf2/dirtyfrag-ESP."""
+    if not systemd_running():
+        return Check("systemd_restrict_namespaces", "MITIGATION", Status.SKIP,
+                     "systemd not running")
+    findings_ok = []
+    findings_missing = []
+    findings_optional_ok = []
+    for d in CF_CLASS_TENANT_UNITS + CF_CLASS_OPTIONAL_UNITS:
+        unit = d if d.endswith("@") else d
+        rc, out, err = run_cmd(["systemctl", "show",
+                                "-p", "RestrictNamespaces",
+                                "{}.service".format(unit)], timeout=3)
+        if rc != 0:
+            continue
+        kv = {}
+        for line in out.decode("utf-8", errors="replace").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                kv[k] = v
+        rn = kv.get("RestrictNamespaces", "")
+        if not rn:
+            # Unit has no RestrictNamespaces directive set
+            if d in CF_CLASS_TENANT_UNITS:
+                findings_missing.append(d)
+            continue
+        if _unit_namespaces_blocked(rn):
+            if d in CF_CLASS_TENANT_UNITS:
+                findings_ok.append(d)
+            else:
+                findings_optional_ok.append(d)
+
+    details = {"protected_tenant_units": findings_ok,
+               "missing_tenant_units": findings_missing,
+               "protected_optional_units": findings_optional_ok}
+    if findings_ok and not findings_missing:
+        return Check("systemd_restrict_namespaces", "MITIGATION", Status.OK,
+                     "{} tenant units block user+net namespaces".format(
+                         len(findings_ok)),
+                     details=details)
+    if findings_ok and findings_missing:
+        return Check("systemd_restrict_namespaces", "MITIGATION", Status.WARN,
+                     "partial coverage: {} protected, {} missing".format(
+                         len(findings_ok), len(findings_missing)),
+                     details=details,
+                     remediation="Install copyfail-defense-systemd, OR add "
+                                 "drop-ins under /etc/systemd/system/<unit>"
+                                 ".service.d/10-copyfail-defense.conf with "
+                                 "RestrictNamespaces=~user ~net")
+    if findings_missing:
+        return Check("systemd_restrict_namespaces", "MITIGATION", Status.WARN,
+                     "no tenant unit blocks user+net namespaces "
+                     "(cf2 / dirtyfrag-ESP unshare prerequisite reachable)",
+                     details=details,
+                     remediation="dnf install copyfail-defense-systemd, OR "
+                                 "add drop-ins manually.")
+    return Check("systemd_restrict_namespaces", "MITIGATION", Status.SKIP,
+                 "no tenant units found in this systemd instance",
+                 details=details)
+
+# Files / globs to scan for PAM `pam_unix.so` `nullok` (dirtyfrag-RxRPC
+# weaponizes empty-password auth via /etc/passwd corruption).
+PAM_NULLOK_PATHS = [
+    "/etc/pam.d/system-auth",
+    "/etc/pam.d/password-auth",
+    "/etc/pam.d/common-auth",
+    "/etc/pam.d/login",
+    "/etc/pam.d/sshd",
+    "/etc/pam.d/passwd",
+    "/etc/pam.d/su",
+]
+PAM_NULLOK_GLOBS = [
+    "/etc/pam.d/cpanel*",
+    "/etc/pam.d/plesk*",
+]
+_PAM_NULLOK_RE = re.compile(
+    r"^\s*[a-z]+\s+(?:\[[^\]]+\]|sufficient|required|requisite|optional|include|substack)?"
+    r"\s*pam_unix\.so\b[^#\n]*\bnullok\b",
+    re.MULTILINE)
+
+def check_pam_nullok():
+    """dirtyfrag-RxRPC: scan PAM stacks for pam_unix.so nullok.
+
+    The Dirty Frag RxRPC variant overwrites /etc/passwd line 1 to
+    'root::0:0:...' (empty password field) and relies on pam_unix.so
+    nullok to accept it. Stock RHEL authselect profiles do NOT include
+    nullok; cPanel/Plesk PAM stacks have historically re-introduced it."""
+    findings = []
+    paths = list(PAM_NULLOK_PATHS)
+    for g in PAM_NULLOK_GLOBS:
+        paths += glob.glob(g)
+    seen = set()
+    for path in paths:
+        if path in seen or not os.path.isfile(path):
+            continue
+        seen.add(path)
+        text = read_text_safe(path) or ""
+        for m in _PAM_NULLOK_RE.finditer(text):
+            findings.append({"path": path,
+                             "line": m.group(0).strip()[:120]})
+    if not findings:
+        return Check("pam_nullok", "DETECTION", Status.OK,
+                     "no pam_unix.so nullok in scanned PAM stacks ({})".format(
+                         len(seen)))
+    return Check("pam_nullok", "DETECTION", Status.WARN,
+                 "{} pam_unix.so nullok occurrence(s) - empty-password auth "
+                 "accepted (dirtyfrag-RxRPC weapon)".format(len(findings)),
+                 details={"occurrences": findings[:8],
+                          "files_scanned": len(seen)},
+                 remediation="Remove 'nullok' from pam_unix.so lines in the "
+                             "listed PAM files. On RHEL with authselect, run "
+                             "'authselect select sssd' or your site profile "
+                             "to restore the canonical no-nullok stack.")
+
+def check_unprivileged_userns_sysctl():
+    """v2.0.0 HARDENING: report userns sysctl posture.
+
+    INFO only - the -userns subpackage is opt-in (deferred to 2.1.0)
+    because turning userns off breaks rootless podman, browser
+    sandboxes, and flatpak. This check informs the operator without
+    recommending action."""
+    rhel = read_text_safe("/proc/sys/user/max_user_namespaces")
+    deb = read_text_safe("/proc/sys/kernel/unprivileged_userns_clone")
+    parts = []
+    if rhel is not None:
+        parts.append("user.max_user_namespaces={}".format(rhel.strip()))
+    if deb is not None:
+        parts.append("kernel.unprivileged_userns_clone={}".format(deb.strip()))
+    if not parts:
+        return Check("userns_sysctl", "HARDENING", Status.SKIP,
+                     "userns sysctls unreadable")
+    rhel_blocked = (rhel is not None and rhel.strip() == "0")
+    deb_blocked  = (deb  is not None and deb.strip()  == "0")
+    if rhel_blocked or deb_blocked:
+        return Check("userns_sysctl", "HARDENING", Status.OK,
+                     "unprivileged userns disabled - cf2 / dirtyfrag-ESP "
+                     "unshare prerequisite blocked",
+                     details={"sysctls": parts})
+    return Check("userns_sysctl", "HARDENING", Status.INFO,
+                 "unprivileged userns enabled: " + "; ".join(parts) +
+                 " (cf2 / dirtyfrag-ESP unshare prerequisite reachable)",
+                 details={"sysctls": parts})
+
+def check_apparmor_userns_restrict():
+    """ENV: Ubuntu/Debian apparmor userns posture.
+
+    Ubuntu's apparmor_restrict_unprivileged_userns gates apparmor's
+    permission to confine unprivileged user-namespace creation. cf2
+    / Dirty Frag's aa-rootns harness defeats this via change_onexec
+    profile-hops, so apparmor alone is not sufficient. Detection
+    matters because an operator may believe they're protected when
+    they're only partially so."""
+    val = read_text_safe("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+    if val is None:
+        return None  # Not Ubuntu/Debian, or apparmor not loaded
+    v = val.strip()
+    if v == "1":
+        return Check("apparmor_userns_restrict", "ENV", Status.INFO,
+                     "apparmor_restrict_unprivileged_userns=1 "
+                     "(bypassable via change_onexec into permissive profiles "
+                     "- see Dirty Frag aa-rootns)",
+                     details={"value": v})
+    return Check("apparmor_userns_restrict", "ENV", Status.INFO,
+                 "apparmor_restrict_unprivileged_userns={} (no apparmor "
+                 "userns gating)".format(v),
+                 details={"value": v})
+
+def _has_non_admin_login_users():
+    """Heuristic: are there interactive users not in wheel/admin?
+
+    cf2/dirtyfrag-ESP target /usr/bin/su; chmod 4750 is the obvious
+    hardening. But on cPanel/hosting nodes there are many tenant
+    users with shells who legitimately use su; chmod-ing 4750 breaks
+    them. We suppress the recommendation when this heuristic detects
+    such a fleet shape."""
+    pwd = read_text_safe("/etc/passwd") or ""
+    grp = read_text_safe("/etc/group") or ""
+    wheel_members = set()
+    for line in grp.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 4 and parts[0] in ("wheel", "admin", "sudo"):
+            for u in parts[3].split(","):
+                u = u.strip()
+                if u:
+                    wheel_members.add(u)
+    interactive_shells = ("/bin/bash", "/bin/sh", "/bin/zsh", "/bin/ash",
+                          "/bin/dash", "/usr/bin/bash", "/usr/bin/zsh")
+    non_admin_login_count = 0
+    for line in pwd.splitlines():
+        parts = line.split(":")
+        if len(parts) < 7:
+            continue
+        user, _, uid_s, _, _, _, shell = parts[:7]
+        try:
+            uid = int(uid_s)
+        except ValueError:
+            continue
+        if uid < 1000:                # system user
+            continue
+        if shell.strip() not in interactive_shells:
+            continue
+        if user in wheel_members:
+            continue
+        non_admin_login_count += 1
+    return non_admin_login_count
+
+def check_su_target_hardening():
+    """HARDENING: /usr/bin/su mode + ownership; recommend conditional chmod.
+
+    Recommendation suppressed when /etc/passwd analysis shows non-wheel
+    interactive users (cPanel-shaped fleet)."""
+    p = "/usr/bin/su"
+    try:
+        st = os.stat(p)
+    except OSError:
+        return Check("su_target_hardening", "HARDENING", Status.SKIP,
+                     "/usr/bin/su not found")
+    mode = stat.S_IMODE(st.st_mode)
+    is_setuid = bool(mode & stat.S_ISUID)
+    other_exec = bool(mode & stat.S_IXOTH)
+    group = st.st_gid
+    details = {
+        "path": p,
+        "mode_octal": oct(mode),
+        "uid": st.st_uid,
+        "gid": st.st_gid,
+        "setuid": is_setuid,
+        "world_executable": other_exec,
+    }
+    if not is_setuid:
+        return Check("su_target_hardening", "HARDENING", Status.OK,
+                     "/usr/bin/su is not setuid (already hardened)",
+                     details=details)
+    if not other_exec:
+        return Check("su_target_hardening", "HARDENING", Status.OK,
+                     "/usr/bin/su is mode {} - non-world-exec".format(
+                         oct(mode)),
+                     details=details)
+    # Setuid root + world-executable. Decide whether to recommend hardening.
+    non_admin = _has_non_admin_login_users()
+    details["non_admin_login_users"] = non_admin
+    if non_admin > 0:
+        return Check("su_target_hardening", "HARDENING", Status.INFO,
+                     "/usr/bin/su is setuid + world-exec (cf2 / dirtyfrag-ESP "
+                     "target). Hardening NOT recommended: {} non-admin "
+                     "interactive users present (chmod 4750 would break their "
+                     "su workflow)".format(non_admin),
+                     details=details)
+    return Check("su_target_hardening", "HARDENING", Status.WARN,
+                 "/usr/bin/su is setuid + world-exec (cf2 / dirtyfrag-ESP "
+                 "target). No non-admin interactive users detected.",
+                 details=details,
+                 remediation="chmod 4750 /usr/bin/su && chgrp wheel /usr/bin/su "
+                             "(restrict invocation to wheel group). Confirm "
+                             "no automation depends on tenant su before applying.")
+
+def check_auditd_rules_extended():
+    """DETECTION: report on cf-class auditd rule keys.
+
+    Rules are NOT installed by the package - emitted by --emit-remediation
+    for operator review. Keys: cf_userns (unshare CLONE_NEWUSER),
+    cf_addkey (rxrpc key registration), plus the existing afalg_attempt
+    from v1.0.1."""
+    rc, out, err = run_cmd(["auditctl", "-l"], timeout=3)
+    if rc != 0:
+        return Check("audit_rules_extended", "DETECTION", Status.SKIP,
+                     "auditctl unavailable or returned error")
+    text = out.decode("utf-8", errors="replace") if out else ""
+    keys_found = set()
+    for line in text.splitlines():
+        m = re.search(r"-k\s+(\S+)", line)
+        if m:
+            keys_found.add(m.group(1))
+    # cf-class audit keys. Names align with what --emit-remediation
+    # writes to /etc/audit/rules.d/copyfail.rules. Operators may run
+    # different keys; we report on absence of OUR canonical set, not
+    # on absence of any related rule.
+    cf_keys = ["afalg_attempt", "cf_userns", "cf_addkey", "cf_xfrm_nl",
+               "splice_tenant"]
+    missing = [k for k in cf_keys if k not in keys_found]
+    if not missing:
+        return Check("audit_rules_extended", "DETECTION", Status.OK,
+                     "all cf-class audit rules present: {}".format(
+                         ", ".join(cf_keys)),
+                     details={"present": sorted(keys_found & set(cf_keys))})
+    return Check("audit_rules_extended", "DETECTION", Status.INFO,
+                 "cf-class audit rules missing: {}".format(", ".join(missing)),
+                 details={"present": sorted(keys_found & set(cf_keys)),
+                          "missing": missing},
+                 remediation="See --emit-remediation for the exact "
+                             "auditctl/augenrules invocations.")
+
+def check_initcall_blacklist():
+    """v2.0.0: parse /proc/cmdline for initcall_blacklist= covering
+    cf-class entry-point modules.
+
+    Per CERT-EU 2026-005 + CloudLinux guidance: on some distros, modprobe
+    blacklist alone is insufficient because the modules are wired into
+    the kernel via initcall_*. Operators can append `initcall_blacklist=
+    algif_aead_init,esp4_init,esp6_init,rxrpc_init` to GRUB to neutralize
+    these at boot."""
+    cmdline = read_text_safe("/proc/cmdline") or ""
+    m = re.search(r"\binitcall_blacklist=(\S+)", cmdline)
+    if not m:
+        return Check("initcall_blacklist", "MITIGATION", Status.INFO,
+                     "no initcall_blacklist= in /proc/cmdline (defense in "
+                     "depth gap on kernels where cf-class modules are "
+                     "compiled in)",
+                     remediation="Append to GRUB_CMDLINE_LINUX in "
+                                 "/etc/default/grub: "
+                                 "initcall_blacklist=algif_aead_init,"
+                                 "esp4_init,esp6_init,rxrpc_init "
+                                 "then grub2-mkconfig + reboot. Coverage is "
+                                 "boot-permanent until the line is removed.")
+    inits = m.group(1).split(",")
+    cf_inits = ["algif_aead_init", "esp4_init", "esp6_init", "rxrpc_init"]
+    covered = [i for i in cf_inits if i in inits]
+    missing = [i for i in cf_inits if i not in inits]
+    if missing:
+        return Check("initcall_blacklist", "MITIGATION", Status.INFO,
+                     "initcall_blacklist=set but missing: {}".format(
+                         ", ".join(missing)),
+                     details={"covered": covered, "missing": missing,
+                              "all_initcalls": inits})
+    return Check("initcall_blacklist", "MITIGATION", Status.OK,
+                 "initcall_blacklist= covers all cf-class init paths",
+                 details={"covered": covered, "all_initcalls": inits})
+
+# Legitimate AF_ALG users on a stock RHEL host. Anything OUTSIDE this list
+# is suspicious (per Sysdig CVE-2026-31431 scoping guidance).
+AF_ALG_LEGITIMATE = (
+    "cryptsetup", "systemd-cryptsetup", "veritysetup", "integritysetup",
+    "kcapi-",
+)
+
+def check_af_alg_holders():
+    """v2.0.0: snapshot processes currently holding AF_ALG sockets.
+
+    Useful as a baseline before enabling the shim — operators can
+    confirm no legitimate process actively uses AF_ALG before enforcing
+    a global block. Best-effort: depends on `ss` or `lsof`; degrades to
+    SKIP if neither is available."""
+    rc, out, err = run_cmd(["ss", "-x", "-a", "-p"], timeout=4)
+    if rc != 0:
+        rc, out, err = run_cmd(["lsof", "-nP", "+c0"], timeout=8)
+        if rc != 0:
+            return Check("af_alg_holders", "DETECTION", Status.SKIP,
+                         "ss/lsof unavailable - cannot inventory AF_ALG "
+                         "socket holders")
+    text = out.decode("utf-8", errors="replace") if out else ""
+    holders = []
+    suspicious = []
+    for line in text.splitlines():
+        if "AF_ALG" not in line and "alg:" not in line:
+            continue
+        # Try to extract a process name from the line. Format varies
+        # across ss / lsof; we keep it best-effort.
+        proc = ""
+        m = re.search(r'"([^"]+)"', line)
+        if m:
+            proc = m.group(1)
+        else:
+            toks = line.split()
+            if toks:
+                proc = toks[0]
+        if not proc:
+            continue
+        holders.append(proc)
+        if not any(proc.startswith(p) for p in AF_ALG_LEGITIMATE):
+            suspicious.append(proc)
+    if not holders:
+        return Check("af_alg_holders", "DETECTION", Status.OK,
+                     "no live AF_ALG socket holders")
+    if suspicious:
+        return Check("af_alg_holders", "DETECTION", Status.WARN,
+                     "{} suspicious AF_ALG socket holder(s): {}".format(
+                         len(set(suspicious)), ", ".join(sorted(set(suspicious))[:5])),
+                     details={"all_holders": sorted(set(holders)),
+                              "suspicious": sorted(set(suspicious))})
+    return Check("af_alg_holders", "DETECTION", Status.INFO,
+                 "{} AF_ALG socket holder(s), all in expected allowlist".format(
+                     len(set(holders))),
+                 details={"holders": sorted(set(holders))})
+
+def check_kernel_log_iocs():
+    """v2.0.0: scan dmesg / /var/log/messages for cf-class kernel events.
+
+    Specific signatures from Threatbear + thrandomv detection packs:
+    - alg: api / alg-aead module load events
+    - xfrm_user: Init / xfrm-policy add events
+    - ESP: Init / IPv6 ESP autoload markers
+    - 'Key type rxrpc registered' (rxrpc.ko first-load marker)
+    - audit: type=1326 (seccomp violation) clusters
+    Best-effort: tries dmesg first, falls back to /var/log/messages."""
+    rc, out, err = run_cmd(["dmesg", "-T"], timeout=4)
+    if rc == 0 and out:
+        text = out.decode("utf-8", errors="replace")
+    else:
+        # Single-pass fallback: read /var/log/messages directly.
+        text = read_text_safe("/var/log/messages",
+                              max_bytes=2 * 1024 * 1024) or ""
+    if not text:
+        return Check("kernel_log_iocs", "DETECTION", Status.SKIP,
+                     "kernel log unavailable (dmesg requires CAP_SYSLOG; "
+                     "/var/log/messages unreadable)")
+
+    patterns = [
+        ("algif_aead_load",     re.compile(r"alg:\s+(?:Test|api).*aead", re.IGNORECASE)),
+        ("xfrm_user_init",      re.compile(r"\bxfrm_user\b", re.IGNORECASE)),
+        ("esp_init",            re.compile(r"\bIPsec\s*ESP\b|\bESP[46]?\s*Init\b", re.IGNORECASE)),
+        ("rxrpc_register",      re.compile(r"Key type rxrpc registered", re.IGNORECASE)),
+        ("seccomp_violation",   re.compile(r"audit.*type=1326")),
+    ]
+    hits = {}
+    for name, pat in patterns:
+        n = sum(1 for _ in pat.finditer(text))
+        if n:
+            hits[name] = n
+    if not hits:
+        return Check("kernel_log_iocs", "DETECTION", Status.OK,
+                     "no cf-class IOC patterns in kernel log sample")
+    return Check("kernel_log_iocs", "DETECTION", Status.INFO,
+                 "kernel log has cf-class load/probe markers: " +
+                 ", ".join("{}={}".format(k, v) for k, v in hits.items()),
+                 details={"hits": hits})
+
+def check_lsm_stack():
+    """v2.0.0: report active LSM stack.
+
+    bpf-lsm enables Cloudflare-style AF_ALG socket_bind allowlisting
+    (out of scope for this auditor's enforcement, but operators
+    deploying that defense need bpf in the LSM stack)."""
+    val = read_text_safe("/sys/kernel/security/lsm")
+    if val is None:
+        return Check("lsm_stack", "ENV", Status.SKIP,
+                     "/sys/kernel/security/lsm unreadable "
+                     "(securityfs not mounted, or no CAP_SYS_ADMIN)")
+    lsms = val.strip().split(",")
+    has_bpf = "bpf" in lsms
+    return Check("lsm_stack", "ENV", Status.INFO,
+                 "active LSMs: {} (bpf-lsm: {})".format(
+                     ", ".join(lsms), "available" if has_bpf else "absent"),
+                 details={"lsms": lsms, "bpf_lsm": has_bpf})
+
 # --- Orchestration ---------------------------------------------------------
 
 def run_all_checks(args):
@@ -1266,6 +1891,13 @@ def run_all_checks(args):
 
     PROGRESS.step("collecting environment info")
     add_many(check_environment(), "ENV")
+    # v2.0.0: apparmor userns posture (Ubuntu/Debian only; returns None on
+    # non-apparmor hosts and add_one filters it).
+    PROGRESS.step("checking apparmor userns posture")
+    add_one(check_apparmor_userns_restrict(), "ENV")
+    # v2.0.0: active LSM stack (bpf-lsm informs Cloudflare-style enforcement)
+    PROGRESS.step("reading active LSM stack")
+    add_one(check_lsm_stack(), "ENV")
 
     PROGRESS.step("probing AF_ALG socket family")
     add_one(check_af_alg_socket(), "KERNEL")
@@ -1273,6 +1905,12 @@ def run_all_checks(args):
     add_one(check_authencesn_cipher(), "KERNEL")
     PROGRESS.step("checking algif_aead state")
     add_one(check_algif_aead_state(), "KERNEL")
+    # v2.0.0: cf2 / dirtyfrag-ESP module reachability
+    PROGRESS.step("checking xfrm-ESP module state (cf2 / dirtyfrag-ESP)")
+    add_one(check_xfrm_modules(), "KERNEL")
+    # v2.0.0: dirtyfrag-RxRPC module reachability
+    PROGRESS.step("checking rxrpc module state (dirtyfrag-RxRPC)")
+    add_one(check_rxrpc_module(), "KERNEL")
     if not args.skip_trigger:
         PROGRESS.step("running trigger probe (sentinel file, AEAD/splice)")
         add_one(trigger_probe(), "KERNEL")
@@ -1283,10 +1921,20 @@ def run_all_checks(args):
     add_one(check_shim_blocks_af_alg(), "MITIGATION")
     PROGRESS.step("scanning modprobe.d for AF_ALG blacklist")
     add_one(check_modprobe_blacklist(), "MITIGATION")
+    # v2.0.0: cf-class extended modprobe coverage
+    PROGRESS.step("scanning modprobe.d for cf-class extended coverage")
+    add_one(check_modprobe_blacklist_extended(), "MITIGATION")
     PROGRESS.step("checking kernel.modules_disabled")
     add_one(check_modules_disabled(), "MITIGATION")
+    # v2.0.0: initcall_blacklist= GRUB-line check (CERT-EU 2026-005 +
+    # CloudLinux guidance for builtin-module kernels)
+    PROGRESS.step("checking initcall_blacklist= in /proc/cmdline")
+    add_one(check_initcall_blacklist(), "MITIGATION")
     PROGRESS.step("checking systemd RestrictAddressFamilies")
     add_one(check_systemd_restrict_address_families(), "MITIGATION")
+    # v2.0.0: cf2 / dirtyfrag-ESP RestrictNamespaces coverage
+    PROGRESS.step("checking systemd RestrictNamespaces (cf2/dirtyfrag-ESP)")
+    add_one(check_systemd_restrict_namespaces(), "MITIGATION")
     PROGRESS.step("checking user@.service drop-in")
     add_one(check_user_service_dropin(), "MITIGATION")
     PROGRESS.step("checking systemd drop-in freshness vs running daemons")
@@ -1299,11 +1947,29 @@ def run_all_checks(args):
         add_many(check_page_cache_integrity(), "HARDENING")
         PROGRESS.step("scanning file capabilities")
         add_one(check_file_capabilities(), "HARDENING")
+        # v2.0.0: cf2 / dirtyfrag-ESP /usr/bin/su hardening (conditional)
+        PROGRESS.step("checking /usr/bin/su hardening (conditional)")
+        add_one(check_su_target_hardening(), "HARDENING")
+        # v2.0.0: unprivileged userns sysctl posture
+        PROGRESS.step("checking unprivileged userns sysctls")
+        add_one(check_unprivileged_userns_sysctl(), "HARDENING")
 
     PROGRESS.step("checking auditd state and rules")
     add_many(check_auditd(), "DETECTION")
+    # v2.0.0: cf-class extended auditd rule keys
+    PROGRESS.step("checking cf-class auditd rules (cf_userns, cf_addkey)")
+    add_one(check_auditd_rules_extended(), "DETECTION")
     PROGRESS.step("verifying seccomp filter active on running daemons")
     add_one(check_seccomp_runtime(), "DETECTION")
+    # v2.0.0: dirtyfrag-RxRPC PAM nullok scan
+    PROGRESS.step("scanning PAM stacks for pam_unix.so nullok")
+    add_one(check_pam_nullok(), "DETECTION")
+    # v2.0.0: live AF_ALG socket holder snapshot (Sysdig scoping)
+    PROGRESS.step("inventorying live AF_ALG socket holders")
+    add_one(check_af_alg_holders(), "DETECTION")
+    # v2.0.0: kernel log IOC scan (Threatbear / thrandomv signatures)
+    PROGRESS.step("scanning kernel log for cf-class load/probe markers")
+    add_one(check_kernel_log_iocs(), "DETECTION")
     PROGRESS.step("scanning recent log IOCs")
     add_one(check_recent_ioc_signals(), "DETECTION")
 
@@ -1337,7 +2003,7 @@ POSTURE_LAYERS = [
     ("audit_rule_af_alg",    "audit_rule_af_alg"),
 ]
 
-def determine_posture(results):
+def determine_posture(results, category_filter_active=False):
     by_name = {r.name: r for r in results}
     layers = {}
     for slot, check_name in POSTURE_LAYERS:
@@ -1362,9 +2028,112 @@ def determine_posture(results):
         verdict = "kernel_likely_safe"
     else:
         verdict = "inconclusive"
-    return {"verdict": verdict, "layers": layers}
+    # When --category narrows the run, the bug-class aggregator can't
+    # see the full picture (e.g., MITIGATION checks omitted on a
+    # KERNEL-only run). Mark mitigated/applicable as None and emit
+    # filter_applied so SIEM consumers don't treat partial runs as
+    # "vulnerable".
+    bug_classes = _aggregate_bug_classes(by_name)
+    if category_filter_active:
+        for cls in bug_classes:
+            bug_classes[cls]["mitigated"] = None
+            bug_classes[cls]["filter_applied"] = True
+        covered = []
+    else:
+        covered = sorted([cls for cls, info in bug_classes.items()
+                          if info.get("mitigated") is True])
+    return {
+        "verdict": verdict,
+        "layers": layers,
+        "bug_classes": bug_classes,
+        "bug_classes_covered": covered,
+    }
 
-def emit_remediation_script(results):
+def _aggregate_bug_classes(by_name):
+    """Per-class applicability + mitigation summary for SIEM consumers.
+
+    A class is `applicable` when its kernel sink is reachable on the
+    host. A class is `mitigated` when at least one of the layers that
+    cuts the chain is OK. The map is consumed via posture.bug_classes
+    (granular) and posture.bug_classes_covered (array of mitigated
+    class IDs - SIEM-ergonomic single filter)."""
+    def is_ok(name):
+        r = by_name.get(name)
+        return r is not None and r.status == Status.OK
+
+    def status_of(name):
+        r = by_name.get(name)
+        return r.status if r is not None else None
+
+    # cf1 - CVE-2026-31431 / algif_aead
+    cf1_app = (status_of("af_alg_socket") not in (Status.OK, None)) or \
+              (status_of("trigger_probe") == Status.VULN)
+    cf1_mit = is_ok("shim_blocks_af_alg") or is_ok("systemd_restrict") or \
+              is_ok("modprobe_extended") or is_ok("modprobe_blacklist") or \
+              is_ok("trigger_probe")  # patched kernel
+
+    # cf2 / dirtyfrag-ESP - xfrm-ESP skip_cow path
+    xfrm_state = by_name.get("xfrm_modules")
+    cf2_app = xfrm_state is not None and xfrm_state.status != Status.OK
+    cf2_mit = is_ok("modprobe_extended") or \
+              is_ok("systemd_restrict_namespaces") or \
+              is_ok("userns_sysctl")
+
+    # dirtyfrag-RxRPC - rxkad pcbc(fcrypt) on splice'd frag
+    rxrpc_state = by_name.get("rxrpc_module")
+    rxrpc_app = rxrpc_state is not None and rxrpc_state.status != Status.OK
+    rxrpc_mit = is_ok("modprobe_extended") or \
+                (rxrpc_state is not None and rxrpc_state.status == Status.OK)
+
+    # Per-class layer breakdown (which mitigations are active for each class).
+    # Surfaces in the holistic view + JSON for SIEM/dashboard consumption.
+    cf1_layers = {
+        "kernel_patched":         status_of("trigger_probe") == Status.OK,
+        "ld_preload_shim":        is_ok("shim_blocks_af_alg"),
+        "systemd_af_alg":         is_ok("systemd_restrict"),
+        "modprobe_blacklist":     is_ok("modprobe_extended") or is_ok("modprobe_blacklist"),
+        "modules_disabled":       is_ok("modules_disabled"),
+    }
+    cf2_layers = {
+        "modprobe_blacklist":     is_ok("modprobe_extended"),
+        "systemd_restrict_ns":    is_ok("systemd_restrict_namespaces"),
+        "userns_sysctl":          is_ok("userns_sysctl"),
+        "user_at_dropin":         is_ok("user_service_dropin"),
+    }
+    rxrpc_layers = {
+        "modprobe_blacklist":     is_ok("modprobe_extended"),
+        "systemd_af_rxrpc":       is_ok("systemd_restrict_namespaces"),  # same drop-in body covers both
+        "rxrpc_module_absent":    rxrpc_state is not None and rxrpc_state.status == Status.OK,
+    }
+
+    return {
+        "cf1": {
+            "applicable": bool(cf1_app),
+            "mitigated":  bool(cf1_mit) if cf1_app else None,
+            "kernel_sink": "algif_aead AEAD scratch-write (CVE-2026-31431)",
+            "layers": {k: bool(v) for k, v in cf1_layers.items()},
+        },
+        "cf2": {
+            "applicable": bool(cf2_app),
+            "mitigated":  bool(cf2_mit) if cf2_app else None,
+            "kernel_sink": "esp_input skip_cow path (xfrm IPsec ESP)",
+            "layers": {k: bool(v) for k, v in cf2_layers.items()},
+        },
+        "dirtyfrag-esp": {
+            "applicable": bool(cf2_app),  # same kernel sink as cf2
+            "mitigated":  bool(cf2_mit) if cf2_app else None,
+            "kernel_sink": "esp_input skip_cow path (Dirty Frag-ESP, same sink as cf2)",
+            "layers": {k: bool(v) for k, v in cf2_layers.items()},
+        },
+        "dirtyfrag-rxrpc": {
+            "applicable": bool(rxrpc_app),
+            "mitigated":  bool(rxrpc_mit) if rxrpc_app else None,
+            "kernel_sink": "rxkad_verify_packet_1 in-place pcbc(fcrypt)",
+            "layers": {k: bool(v) for k, v in rxrpc_layers.items()},
+        },
+    }
+
+def emit_remediation_script(results, category_filter_active=False):
     """Print a bash script of the remediations from non-OK checks.
 
     Aggregates Check.remediation strings as comments + commented-out
@@ -1372,14 +2141,17 @@ def emit_remediation_script(results):
     several remediations (chmod 4750 on suid binaries, modules_disabled
     sysctl) are operationally consequential and policy-dependent.
     """
-    posture = determine_posture(results)
+    posture = determine_posture(results, category_filter_active)
     lines = [
         "#!/bin/bash",
-        "# Auto-generated remediation suggestions for CVE-2026-31431.",
+        "# Auto-generated remediation suggestions for the Copy Fail",
+        "# bug class (cf1 / cf2 / Dirty Frag).",
         "# rfxn.com - forged in prod - github.com/rfxn/copyfail",
         "# Hostname: {}    Kernel: {}".format(
             os.uname().nodename, os.uname().release),
         "# Verdict:  {}".format(posture["verdict"]),
+        "# Coverage: " + (", ".join(posture.get("bug_classes_covered", []))
+                          or "(none)"),
         "#",
         "# REVIEW EVERY BLOCK BEFORE RUNNING. Some changes (chmod on suid",
         "# binaries, kernel.modules_disabled=1) are policy-dependent or",
@@ -1405,42 +2177,90 @@ def emit_remediation_script(results):
         lines.append("")
     # Append a small block of canonical commands the auditor knows are
     # safe to run unattended; keep them commented so review remains
-    # mandatory.
+    # mandatory. v2.0.0: extended for cf-class coverage.
     lines += [
         "# === Canonical commands (review and uncomment to apply) =====",
         "#",
-        "# # 1. Drop AF_ALG modules + blacklist:",
-        "# rmmod algif_aead 2>/dev/null || true",
-        "# cat >/etc/modprobe.d/99-no-afalg.conf <<'EOF'",
-        "# install af_alg /bin/false",
-        "# install algif_aead /bin/false",
-        "# install algif_skcipher /bin/false",
-        "# install algif_hash /bin/false",
-        "# install algif_rng /bin/false",
-        "# EOF",
+        "# # FAST PATH: install the copyfail-defense umbrella package",
+        "# # (covers everything below):",
+        "# curl -sSL https://rfxn.github.io/copyfail/copyfail.repo \\",
+        "#   | sudo tee /etc/yum.repos.d/copyfail.repo",
+        "# sudo dnf install -y copyfail-defense",
+        "# sudo /usr/sbin/copyfail-shim-enable",
         "#",
-        "# # 2. systemd user@.service drop-in:",
-        "# install -d /etc/systemd/system/user@.service.d",
-        "# cat >/etc/systemd/system/user@.service.d/no-afalg.conf <<'EOF'",
+        "# # MANUAL PATH (if you can't install the package):",
+        "#",
+        "# # 1. cf-class modprobe blacklist (cf1 + cf2 + Dirty Frag):",
+        "# sudo tee /etc/modprobe.d/99-copyfail-defense.conf >/dev/null <<'EOF'",
+        "# install algif_aead   /bin/false",
+        "# install authenc      /bin/false",
+        "# install authencesn   /bin/false",
+        "# install af_alg       /bin/false",
+        "# install esp4         /bin/false",
+        "# install esp6         /bin/false",
+        "# install xfrm_user    /bin/false",
+        "# install xfrm_algo    /bin/false",
+        "# install rxrpc        /bin/false",
+        "# blacklist algif_aead",
+        "# blacklist authenc",
+        "# blacklist authencesn",
+        "# blacklist af_alg",
+        "# blacklist esp4",
+        "# blacklist esp6",
+        "# blacklist xfrm_user",
+        "# blacklist xfrm_algo",
+        "# blacklist rxrpc",
+        "# EOF",
+        "# for m in algif_aead authenc authencesn af_alg esp4 esp6 \\",
+        "#          xfrm_user xfrm_algo rxrpc; do",
+        "#     sudo rmmod \"$m\" 2>/dev/null || true",
+        "# done",
+        "#",
+        "# # 2. systemd cf-class drop-ins (tenant units):",
+        "# for u in user@ sshd cron crond atd; do",
+        "#     sudo install -d /etc/systemd/system/${u}.service.d",
+        "#     sudo tee /etc/systemd/system/${u}.service.d/10-copyfail-defense.conf \\",
+        "#         >/dev/null <<EOF",
         "# [Service]",
-        "# RestrictAddressFamilies=~AF_ALG",
+        "# RestrictAddressFamilies=~AF_ALG ~AF_RXRPC",
+        "# RestrictNamespaces=~user ~net",
         "# SystemCallArchitectures=native",
+        "# SystemCallFilter=~@swap",
         "# EOF",
-        "# systemctl daemon-reload",
+        "# done",
+        "# sudo systemctl daemon-reload",
+        "# sudo systemctl try-reload-or-restart sshd.service",
         "#",
-        "# # 3. auditd rules:",
-        "# auditctl -a always,exit -F arch=b64 -S socket -F a0=38 \\",
-        "#   -k afalg_attempt",
-        "# auditctl -a always,exit -F arch=b64 -S splice -k splice_call",
+        "# # 3. cf-class auditd rules (extended):",
+        "# sudo tee /etc/audit/rules.d/copyfail.rules >/dev/null <<'EOF'",
+        "# -a always,exit -F arch=b64 -S socket -F a0=38 -k afalg_attempt",
+        "# -a always,exit -F arch=b64 -S unshare -F auid>=1000 -k cf_userns",
+        "# -a always,exit -F arch=b64 -S add_key -F auid>=1000 -k cf_addkey",
+        "# -a always,exit -F arch=b64 -S socket -F a0=16 -F a2=6 -k cf_xfrm_nl",
+        "# -a always,exit -F arch=b64 -S splice -F auid>=1000 -k splice_tenant",
+        "# EOF",
+        "# sudo augenrules --load",
+        "# # NOTE: cf_xfrm_nl filters AF_NETLINK socket() with NETLINK_XFRM=6",
+        "# # protocol family. kauditd cannot natively filter netlink MESSAGE",
+        "# # types per-protocol, so XFRM_MSG_NEWSA-specific filtering is a",
+        "# # documented gap. Falco / VED-eBPF can fill this with custom",
+        "# # probes if higher fidelity is required.",
+        "# #",
+        "# # POST-FILTER add_key for rxrpc-specific events (dirtyfrag-RxRPC):",
+        "# # ausearch -k cf_addkey | aureport --start today \\",
+        "# #   | grep -i 'desc=rxrpc:'",
         "",
     ]
     print("\n".join(lines))
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CVE-2026-31431 'Copy Fail' comprehensive checker",
+        description="Copy Fail bug-class checker (cf1 / cf2 / Dirty Frag)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Exit: 0=clean 1=err 2=VULN 3=vuln+mitigated 4=hardening_recs")
+        epilog="Covers cf1 (CVE-2026-31431, algif_aead), cf2 (xfrm-ESP), and "
+               "Dirty Frag (xfrm-ESP + RxRPC). "
+               "Exit: 0=clean 1=err 2=VULN 3=vuln+mitigated 4=hardening_recs. "
+               "JSON: posture.bug_classes_covered (array) + .bug_classes (map).")
     parser.add_argument("--json", action="store_true", help="JSON output")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="show all checks including passing")
@@ -1464,7 +2284,8 @@ def main():
     PROGRESS = Progress(enabled=not args.no_progress and not args.json)
 
     if PROGRESS.enabled or PROGRESS.plain:
-        sys.stderr.write("CVE-2026-31431 checker starting on {} ({})\n".format(
+        sys.stderr.write("copyfail-defense checker (cf1+cf2+Dirty Frag) "
+                         "starting on {} ({})\n".format(
             os.uname().nodename, os.uname().release))
         sys.stderr.flush()
 
@@ -1475,22 +2296,24 @@ def main():
               file=sys.stderr)
         return 1
 
+    cat_filter_active = bool(args.category)
     if args.emit_remediation:
-        emit_remediation_script(results)
+        emit_remediation_script(results, cat_filter_active)
         return determine_exit_code(results)
 
     if args.json:
         out = {
-            "schema_version": "1.1",
-            "tool": "copyfail_checker",
+            "schema_version": "2.0",
+            "tool": "copyfail-local-check",
             "publisher": "rfxn.com - forged in prod",
             "url": "https://github.com/rfxn/copyfail",
-            "cve": "CVE-2026-31431",
+            "covers": ["CVE-2026-31431", "cf2-xfrm-esp", "dirtyfrag-esp",
+                       "dirtyfrag-rxrpc"],
             "timestamp": int(time.time()),
             "hostname": os.uname().nodename,
             "kernel": os.uname().release,
             "checks": [r.to_dict() for r in results],
-            "posture": determine_posture(results),
+            "posture": determine_posture(results, cat_filter_active),
             "summary": {
                 "total": len(results),
                 "ok":    sum(1 for r in results if r.status == Status.OK),
@@ -1505,8 +2328,10 @@ def main():
         print(json.dumps(out, indent=2, default=str))
     else:
         print(colorize("=" * 78, C.DIM))
-        print(colorize("CVE-2026-31431 'Copy Fail' Checker  ", C.BOLD)
+        print(colorize("Copy Fail bug-class Checker  ", C.BOLD)
               + colorize("({})".format(os.uname().nodename), C.DIM))
+        print(colorize("cf1 (CVE-2026-31431) / cf2 (xfrm-ESP) / Dirty Frag",
+                       C.DIM))
         print(colorize("rfxn.com - forged in prod - github.com/rfxn/copyfail",
                        C.DIM))
         print(colorize("=" * 78, C.DIM))
@@ -1527,6 +2352,55 @@ def main():
             colorize("FAIL:" + str(fail), C.RED),
             colorize("VULN:" + str(vuln), C.RED + C.BOLD),
             colorize("SKIP:" + str(skip), C.DIM)))
+        # v2.0.0: holistic surface-area view
+        posture_summary = determine_posture(results, cat_filter_active)
+        bc = posture_summary.get("bug_classes", {})
+        print()
+        print(colorize("Surface area / mitigation matrix:", C.BOLD))
+        print(colorize("  Class            Sink reachable?      Mitigated?      Active layers", C.DIM))
+        for cls_id, label in (("cf1", "cf1 (CVE-2026-31431)"),
+                              ("cf2", "cf2 (xfrm-ESP)"),
+                              ("dirtyfrag-esp",   "Dirty Frag-ESP"),
+                              ("dirtyfrag-rxrpc", "Dirty Frag-RxRPC")):
+            info = bc.get(cls_id, {})
+            applicable = info.get("applicable")
+            mitigated  = info.get("mitigated")
+            layers     = info.get("layers", {})
+            active = sorted(k for k, v in layers.items() if v)
+            if not applicable:
+                reach   = colorize("no (n/a)", C.DIM)
+                mit_str = colorize("-", C.DIM)
+                lay_str = colorize("-", C.DIM)
+            elif mitigated is None:
+                reach   = colorize("YES", C.YELLOW)
+                mit_str = colorize("filtered", C.DIM)
+                lay_str = colorize("(--category active)", C.DIM)
+            else:
+                reach = colorize("YES", C.YELLOW)
+                if mitigated:
+                    mit_str = colorize("yes", C.GREEN)
+                    lay_str = colorize(", ".join(active) if active else "(none)", C.GREEN)
+                else:
+                    mit_str = colorize("NO", C.RED)
+                    lay_str = colorize("(none)", C.RED)
+            print("  {:<16} {:<20} {:<15} {}".format(label, reach, mit_str, lay_str))
+        print()
+        # Single-line scan-friendly summary (kept for log-tailers / SIEM grep)
+        def _bc_repr(cls_id):
+            info = bc.get(cls_id, {})
+            if not info.get("applicable"):
+                return colorize("n/a", C.DIM)
+            mit = info.get("mitigated")
+            if mit is None:
+                # filter_applied or class-not-evaluated; do not lie either way
+                return colorize("filtered", C.DIM)
+            if mit:
+                return colorize("mitigated", C.GREEN)
+            return colorize("vulnerable", C.RED)
+        print("Bug-class coverage: cf1={} cf2={} dirtyfrag-esp={} "
+              "dirtyfrag-rxrpc={}".format(
+                  _bc_repr("cf1"), _bc_repr("cf2"),
+                  _bc_repr("dirtyfrag-esp"), _bc_repr("dirtyfrag-rxrpc")))
 
     return determine_exit_code(results)
 
