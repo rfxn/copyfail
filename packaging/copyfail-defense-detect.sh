@@ -146,10 +146,14 @@ detect_rootless_containers() {
         ROOTLESS_SIGNALS+=("systemctl: podman.socket enabled")
     fi
     # Per-user enumeration via loginctl (best-effort; failures are silent
-    # in mock or on hosts without active sessions).
+    # in mock or on hosts without active sessions). The `|| true` is
+    # required: pipefail + a failing loginctl (no D-Bus / no PID 1
+    # systemd) would otherwise propagate rc=1 through the cmd-sub
+    # and trip set -e on the assignment.
     if command -v loginctl >/dev/null 2>&1; then
         local lusers user
-        lusers=$(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}')
+        lusers=$(loginctl list-users --no-legend 2>/dev/null \
+                     | awk '{print $2}' || true)
         for user in ${lusers}; do
             [ -n "${user}" ] || continue
             if systemctl --user --machine="${user}@.host" \
@@ -161,6 +165,7 @@ detect_rootless_containers() {
             fi
         done
     fi
+    return 0
 }
 
 # SUPPRESS_*: true if mitigation is suppressed; false if applied.
