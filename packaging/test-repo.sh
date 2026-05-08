@@ -41,6 +41,11 @@
 #  26. split_upgrade: v2.0.0->v2.0.1 pretrans correctly renames monolithic files
 #  v2.0.1 fixup-pass additions:
 #  27. systemd_only: install -systemd alone still pulls meta; detect.sh runs (M-2 canary)
+#  v2.0.1-2 additions:
+#  28. assert_no_scriptlet_fail at every dnf install/upgrade/remove site -
+#      catches RPM scriptlet syntax errors / aborts that 2.0.1-1's
+#      `dnf ... | tail -N` pipeline silently dropped (dnf returns 0
+#      when scriptlets fail; the warning is in the captured output).
 #
 # Usage:
 #   bash test-repo.sh                 # all three ELs
@@ -89,6 +94,19 @@ run_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 # 0. Distro identity
 . /etc/os-release
@@ -102,7 +120,8 @@ ok "fetched copyfail.repo"
 # 2. Install. Tests gpgkey import, repo_gpgcheck on repomd.xml, and
 #    gpgcheck on each RPM in one shot.
 dnf install -y python3 >/dev/null 2>&1 || true
-dnf install -y copyfail-defense 2>&1 | tail -10
+dnf install -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -10
+assert_no_scriptlet_fail /tmp/dnf.log
 rpm -q copyfail-defense copyfail-defense-shim copyfail-defense-modprobe \
        copyfail-defense-systemd copyfail-defense-auditor \
     || fail "subpackages not all installed"
@@ -226,7 +245,8 @@ ok "copyfail-shim-disable removed the line atomically"
 echo "/usr/lib64/no-afalg.so" > /etc/ld.so.preload   # simulate forgotten enable
 dnf remove -y copyfail-defense copyfail-defense-shim \
               copyfail-defense-modprobe copyfail-defense-systemd \
-              copyfail-defense-auditor >/dev/null 2>&1
+              copyfail-defense-auditor >/tmp/dnf.log 2>&1
+assert_no_scriptlet_fail /tmp/dnf.log
 if [ -f /etc/ld.so.preload ]; then
     grep -Fxq /usr/lib64/no-afalg.so /etc/ld.so.preload \
         && fail "preun left dangling shim line in /etc/ld.so.preload"
@@ -258,6 +278,19 @@ run_upgrade_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 # Add the repo so we can pull both old (afalg-defense-1.0.1) and new
 # (copyfail-defense-2.0.0) RPMs from it - the old ones are kept for
@@ -267,7 +300,8 @@ curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
 # Install old name explicitly. If the live repo no longer has 1.0.1,
 # the test SKIPs (acceptable - means we've moved past the one-cycle
 # retention window; the upgrade path is no longer load-bearing).
-if dnf install -y 'afalg-defense-1.0.1*' 2>&1 | tail -5; then
+if dnf install -y 'afalg-defense-1.0.1*' 2>&1 | tee /tmp/dnf.log | tail -5; then
+    assert_no_scriptlet_fail /tmp/dnf.log
     rpm -q afalg-defense afalg-defense-shim afalg-defense-auditor \
         || fail "v1.0.1 baseline did not install fully"
     ok "v1.0.1 baseline installed"
@@ -277,7 +311,8 @@ else
 fi
 
 # Upgrade to v2.0.0 via Obsoletes/Provides
-dnf upgrade -y copyfail-defense 2>&1 | tail -10
+dnf upgrade -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -10
+assert_no_scriptlet_fail /tmp/dnf.log
 
 # Assert: old name fully replaced
 old_count=$(rpm -qa | grep -c '^afalg-defense' || true)
@@ -327,10 +362,24 @@ run_clean_host_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
 dnf install -y python3 jq >/dev/null 2>&1 || true
-dnf install -y copyfail-defense 2>&1 | tail -5
+dnf install -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -5
+assert_no_scriptlet_fail /tmp/dnf.log
 
 # All 3 modprobe files present
 for f in cf1 cf2-xfrm rxrpc; do
@@ -374,6 +423,19 @@ run_ipsec_host_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 # Pre-stage TWO IPsec signals BEFORE installing the package. Per
 # v2.0.1 fixup M-1, the JSON signals[] field must be a list of N
@@ -396,7 +458,8 @@ EOC
 
 curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
 dnf install -y python3 jq >/dev/null 2>&1 || true
-dnf install -y copyfail-defense 2>&1 | tail -5
+dnf install -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -5
+assert_no_scriptlet_fail /tmp/dnf.log
 
 # cf2-xfrm SUPPRESSED, cf1 + rxrpc PRESENT
 test ! -f /etc/modprobe.d/99-copyfail-defense-cf2-xfrm.conf \
@@ -435,13 +498,27 @@ run_afs_host_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 mkdir -p /etc/openafs
 echo "lan.example.com" > /etc/openafs/ThisCell
 
 curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
 dnf install -y python3 jq >/dev/null 2>&1 || true
-dnf install -y copyfail-defense 2>&1 | tail -5
+dnf install -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -5
+assert_no_scriptlet_fail /tmp/dnf.log
 
 test ! -f /etc/modprobe.d/99-copyfail-defense-rxrpc.conf \
     || fail "rxrpc drop file present despite AFS signal"
@@ -479,6 +556,19 @@ run_rootless_host_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 # Rev 2 fixup (reviewer C-1): pre-stage the storage-tree signal
 # (canonical podman rootless fingerprint), NOT /etc/subuid (which
@@ -497,7 +587,8 @@ touch /home/alice/.local/share/containers/storage/overlay-containers
 
 curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
 dnf install -y python3 jq >/dev/null 2>&1 || true
-dnf install -y copyfail-defense 2>&1 | tail -5
+dnf install -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -5
+assert_no_scriptlet_fail /tmp/dnf.log
 
 # 15-userns DROP for user@ ONLY; sshd/cron/crond/atd 15-* PRESENT;
 # all 10-* PRESENT; all 3 modprobe files PRESENT.
@@ -551,6 +642,19 @@ run_subuid_no_storage_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 # cPanel-shaped fixture: regular users + subuid, but NO podman
 # storage tree, NO /run/user containers, NO podman.socket.
@@ -563,7 +667,8 @@ done
 
 curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
 dnf install -y python3 jq >/dev/null 2>&1 || true
-dnf install -y copyfail-defense 2>&1 | tail -5
+dnf install -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -5
+assert_no_scriptlet_fail /tmp/dnf.log
 
 # Detection must report rootless=false despite the populated subuid.
 jq -e '.detected.rootless_containers.present == false and
@@ -586,6 +691,19 @@ run_force_full_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 # Pre-stage all three signals AND force-full sentinel.
 # Rev 2: rootless signal switched from /etc/subuid to storage-tree
@@ -600,7 +718,8 @@ touch /etc/copyfail/force-full
 
 curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
 dnf install -y python3 jq >/dev/null 2>&1 || true
-dnf install -y copyfail-defense 2>&1 | tail -5
+dnf install -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -5
+assert_no_scriptlet_fail /tmp/dnf.log
 
 # ALL files should be present despite all three signals tripping.
 for f in cf1 cf2-xfrm rxrpc; do
@@ -630,10 +749,24 @@ run_redetect_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
 dnf install -y python3 jq >/dev/null 2>&1 || true
-dnf install -y copyfail-defense 2>&1 | tail -5
+dnf install -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -5
+assert_no_scriptlet_fail /tmp/dnf.log
 
 # Clean install: all 3 modprobe files + 5+5 systemd files.
 test -f /etc/modprobe.d/99-copyfail-defense-rxrpc.conf \
@@ -673,13 +806,27 @@ run_systemd_only_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
 dnf install -y python3 jq >/dev/null 2>&1 || true
 
 # Install ONLY -systemd (and let dnf pull meta as a hard Require).
 # We deliberately do NOT pull -modprobe/-shim/-auditor.
-dnf install -y copyfail-defense-systemd 2>&1 | tail -10
+dnf install -y copyfail-defense-systemd 2>&1 | tee /tmp/dnf.log | tail -10
+assert_no_scriptlet_fail /tmp/dnf.log
 
 # Meta must have been pulled (hard Requires).
 rpm -q copyfail-defense >/dev/null 2>&1 \
@@ -737,12 +884,26 @@ run_split_upgrade_test_in() {
 set -euo pipefail
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok:   $*"; }
+# Catch RPM scriptlet failures: dnf returns 0 even when %posttrans /
+# %postun aborts (it logs "Error in POSTTRANS scriptlet" / "scriptlet
+# failed" and moves on). Without this guard, syntax errors in spec
+# scriptlets ship silently. v2.0.1 -> 2.0.2 closed exactly that hole.
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
 
 curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
 dnf install -y python3 jq >/dev/null 2>&1 || true
 
 # Install v2.0.0 explicitly. If the repo no longer has v2.0.0, SKIP.
-if dnf install -y 'copyfail-defense-2.0.0*' 2>&1 | tail -5; then
+if dnf install -y 'copyfail-defense-2.0.0*' 2>&1 | tee /tmp/dnf.log | tail -5; then
+    assert_no_scriptlet_fail /tmp/dnf.log
     test -f /etc/modprobe.d/99-copyfail-defense.conf \
         || fail "v2.0.0 monolithic modprobe file missing"
     test -f /etc/systemd/system/sshd.service.d/10-copyfail-defense.conf \
@@ -754,7 +915,8 @@ else
 fi
 
 # Upgrade to 2.0.1
-dnf upgrade -y copyfail-defense 2>&1 | tail -10
+dnf upgrade -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -10
+assert_no_scriptlet_fail /tmp/dnf.log
 
 # v2.0.0 monolithic file MUST be gone from its original path
 # (pretrans renamed it to .rpmsave-v2.0.1 per rev 2 D-37).

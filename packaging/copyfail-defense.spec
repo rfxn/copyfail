@@ -14,7 +14,7 @@
 Name:           copyfail-defense
 Epoch:          1
 Version:        2.0.1
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Defense-in-depth toolkit for the Copy Fail bug class
 
 License:        GPLv2
@@ -450,7 +450,7 @@ exit 0
 } | logger -t copyfail-defense -p authpriv.info 2>/dev/null || true
 exit 0
 
-%postun modprobe
+%postun modprobe -p /bin/bash
 # On full erase, remove conditional /etc/ files via detect.sh
 # teardown. RPM has already removed the always-on cf1 file by this
 # point. detect.sh ships in the META package (/usr/libexec/copyfail-defense/)
@@ -472,7 +472,7 @@ if [ "$1" -eq 0 ]; then
 fi
 exit 0
 
-%posttrans modprobe
+%posttrans modprobe -p /bin/bash
 # v2.0.1 rev 2: run detect.sh in modprobe scope only. Per D-56 the
 # scope arg prevents this %posttrans from creating orphan
 # /etc/systemd/system/<unit>.service.d/12-* or 15-* files when
@@ -532,7 +532,7 @@ exit 0
 # cosmetically wasteful and racy.
 exit 0
 
-%posttrans systemd
+%posttrans systemd -p /bin/bash
 # v2.0.1 rev 2: scope=systemd per D-56. -modprobe %posttrans uses
 # scope=modprobe and never touches /etc/systemd/system/...d/. This
 # %posttrans only manages systemd drop-ins. Both write
@@ -547,7 +547,7 @@ if [ -d /run/systemd/system ]; then
 fi
 exit 0
 
-%postun systemd
+%postun systemd -p /bin/bash
 if [ "$1" -eq 0 ]; then
     if [ -x /usr/libexec/copyfail-defense/detect.sh ]; then
         /usr/libexec/copyfail-defense/detect.sh teardown systemd \
@@ -659,6 +659,29 @@ exit 0
 
 # ===========================================================================
 %changelog
+* Fri May 08 2026 rfxn.com <proj@rfxn.com> - 1:2.0.1-2
+- 2.0.1-2 packaging hotfix (no functional change): declare
+  `-p /bin/bash` on the four scriptlets that use bash process
+  substitution (`2> >(tee /dev/stderr | logger ...)`):
+  %posttrans modprobe, %posttrans systemd, %postun modprobe,
+  %postun systemd. RPM scriptlets default to /bin/sh; on EL/Alma 8
+  /bin/sh is bash invoked in POSIX mode, where process substitution
+  is rejected as a syntax error. 2.0.1-1 added the proc-sub idiom
+  per D-55 (surface detect.sh stderr to dnf output) without a
+  matching `-p /bin/bash` on the scriptlet headers, causing
+  %posttrans/%postun to abort with `syntax error near unexpected
+  token \`>'\` on EL8 hosts. detect.sh never ran, so auto-detect.json
+  was never written and conditional drop-ins (cf2-xfrm/rxrpc/userns)
+  were never suppressed - the install appeared to succeed but the
+  detection-driven hardening was inert. Reported by Jamie Sexton on
+  AlmaLinux 8 stage hosts (2026-05-08).
+- packaging/test-repo.sh adds a scriptlet-failure regression guard:
+  every dnf install/upgrade/remove now greps the captured output
+  for `scriptlet failed`, `Error in (POST|PRE)*`, and `syntax error`
+  markers and fails loudly if any appear. Closes the gap that let
+  2.0.1-1 ship without a final dnf-from-gh-pages canary catching
+  this class of bug.
+
 * Fri May 08 2026 rfxn.com <proj@rfxn.com> - 1:2.0.1-1
 - v2.0.1 hotfix: auto-detect IPsec / AFS / rootless-container
   workloads at install time and suppress the conflicting drop-ins.
