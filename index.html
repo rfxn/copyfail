@@ -60,6 +60,7 @@ report a problem: <a href="https://github.com/rfxn/copyfail/issues/new/choose">f
 <nav class="page-nav">
   <a href="#install">Install</a> &middot;
   <a href="#coverage">Coverage</a> &middot;
+  <a href="#auto-detect">Auto-detection</a> &middot;
   <a href="#verify">Verify</a> &middot;
   <a href="#overrides">Overrides</a> &middot;
   <a href="#json">JSON</a> &middot;
@@ -107,9 +108,11 @@ for SIEM ingest.
 <p class="lede">
 <strong>v2.0.1 adds workload auto-detection.</strong> At install time,
 <code>%posttrans</code> inspects the host for IPsec, AFS, and rootless
-containers. Conflicting drop-ins are suppressed automatically; safe
-mitigations remain active. <code>copyfail-redetect</code> re-runs after
+containers. Conflicting drop-ins are suppressed automatically; every
+other layer stays active. <code>copyfail-redetect</code> re-runs after
 fleet changes; <code>/etc/copyfail/force-full</code> bypasses detection.
+See <a href="#auto-detect">&sect;Auto-detection</a> below for the full
+signal list, suppression matrix, and how to inspect the decision.
 </p>
 <p class="lede">
 &#x1F50D; <strong>Full writeup:</strong>
@@ -243,6 +246,179 @@ busy fleet. Review before pasting.
     <td>Hosts already running <code>auditd</code>; pairs with the
         LD_PRELOAD shim as a tripwire.</td></tr>
 </table>
+
+<h2 id="auto-detect">Auto-detection of conflicting workloads</h2>
+<p>
+v2.0.1+ inspects the host in <code>%posttrans</code> for workloads the
+default cuts would break, and <strong>suppresses the conflicting
+drop-in only</strong> while every other layer stays active. The intent
+is "do no harm to running production"; nothing else relaxes. The cf1
+LD_PRELOAD shim and the auditor are <strong>never</strong> suppressed,
+so <a href="https://nvd.nist.gov/vuln/detail/CVE-2026-31431">CVE-2026-31431</a>
+coverage is unchanged on every host.
+</p>
+
+<h3>Why each workload triggers a carve-out</h3>
+<table>
+<tr><th>Workload</th><th>Why the default would break it</th></tr>
+<tr><td><strong>IPsec</strong> (strongSwan, libreswan, openswan)</td>
+    <td>The kernel <code>xfrm</code>/<code>esp</code> path <em>is</em>
+        the cf2 / Dirty Frag-ESP kernel sink. Blacklisting
+        <code>esp4</code>/<code>esp6</code>/<code>xfrm_user</code>/<code>xfrm_algo</code>
+        disables IPsec tunnels entirely (no SA install, no encrypted
+        traffic). Suppression keeps the modprobe drop off and leans on
+        systemd <code>RestrictNamespaces=~user ~net</code> to block the
+        <code>unshare(NEWUSER|NEWNET)</code> step that gates cf2.</td></tr>
+<tr><td><strong>AFS</strong> (openafs, kafs)</td>
+    <td><code>rxrpc</code> is both the DF-RxRPC kernel sink and the
+        transport AFS itself rides on; blacklisting it breaks
+        <code>openafs-client</code>. The per-unit
+        <code>RestrictAddressFamilies=~AF_RXRPC</code> would also
+        break AFS userspace tooling (<code>aklog</code>,
+        <code>kinit</code>-style PAGs) when invoked from any of the
+        five tenant units.</td></tr>
+<tr><td><strong>Rootless containers</strong> (rootless podman/buildah)</td>
+    <td>Rootless <code>podman</code>/<code>buildah</code> needs
+        <code>CLONE_NEWUSER</code> under the calling
+        <code>user@.service</code>. Our default
+        <code>RestrictNamespaces=~user ~net</code> on
+        <code>user@.service</code> turns the
+        <code>unshare(2)</code> into <code>EPERM</code>, which kills
+        every rootless container. Suppression strips the userns
+        drop-in <strong>on <code>user@.service</code> only</strong>:
+        <code>sshd</code>/<code>cron</code>/<code>crond</code>/<code>atd</code>
+        retain it.</td></tr>
+</table>
+
+<h3>Detection signals</h3>
+<table>
+<tr><th>Workload</th><th>Detection signals (any of)</th><th>Suppresses</th></tr>
+<tr><td><strong>IPsec</strong></td>
+    <td><code>systemctl is-enabled</code> returns enabled for
+        <code>strongswan</code>/<code>strongswan-starter</code>/<code>strongswan-swanctl</code>/<code>ipsec</code>/<code>libreswan</code>/<code>openswan</code>/<code>pluto</code>;
+        OR <code>/etc/ipsec.conf</code> has a <code>conn</code> stanza;
+        OR non-empty <code>*.conf</code> in
+        <code>/etc/swanctl/conf.d/</code>, <code>/etc/ipsec.d/</code>,
+        <code>/etc/strongswan/conf.d/</code>, or
+        <code>/etc/strongswan.d/</code>.</td>
+    <td><code>99-cf2-xfrm.conf</code> (esp4, esp6, xfrm_user,
+        xfrm_algo blacklist)</td></tr>
+<tr><td><strong>AFS</strong></td>
+    <td><code>systemctl is-enabled</code> for
+        <code>openafs-client</code>/<code>openafs-server</code>/<code>kafs</code>/<code>afsd</code>;
+        OR <code>/etc/openafs/CellServDB</code> or
+        <code>/etc/openafs/ThisCell</code> exists; OR
+        <code>/etc/krb5.conf.d/openafs*</code> present; OR
+        <code>/proc/fs/afs/</code> registered.</td>
+    <td><code>99-rxrpc.conf</code> (rxrpc modprobe blacklist) AND
+        <code>12-rxrpc-af.conf</code>
+        (<code>RestrictAddressFamilies=~AF_RXRPC</code> on all 5
+        tenant units)</td></tr>
+<tr><td><strong>Rootless containers</strong></td>
+    <td><code>/home/*/.local/share/containers/storage/overlay-containers/</code>
+        present with mtime within 180d; OR
+        <code>/var/lib/containers/storage/</code> non-empty with
+        mtime &lt;90d; OR <code>/run/user/&lt;UID&gt;/containers/</code>
+        present for any <code>UID &ge; 1000</code> (live rootless
+        tmpfs); OR <code>podman.socket</code> enabled (system-wide or
+        any per-user instance).</td>
+    <td><code>15-userns.conf</code> on <code>user@.service.d</code>
+        <strong>only</strong></td></tr>
+</table>
+
+<p class="footnotes">
+False-positive guards baked into the detector:
+<code>/etc/subuid</code> populated by <code>useradd</code> is
+<strong>not</strong> a rootless signal &mdash; shadow-utils auto-populates
+subuid for every regular user regardless of container intent, which
+produced near-100% FPs on cPanel-shaped fleets in v2.0.1 rev 1.
+The rootful <code>/var/lib/containers/storage</code> signal is gated
+on <code>mtime &lt; 90d</code> so a long-purged podman install
+doesn't keep triggering suppression. The <code>/home</code> walk is
+bounded (<code>maxdepth 6</code>, <code>mtime -180</code>) so a
+pathological tenant home tree can't stall <code>%posttrans</code>.
+The <code>/run/user/&lt;UID&gt;/containers</code> signal requires
+<code>UID &ge; 1000</code> so system-account artifacts under
+<code>/run/user/0</code> don't trip detection.
+</p>
+
+<h3>What stays protected after a suppression</h3>
+<table>
+<tr><th>Trigger</th><th>Layer dropped</th><th>Layers still active</th></tr>
+<tr><td><strong>IPsec</strong></td>
+    <td><code>99-cf2-xfrm.conf</code></td>
+    <td>cf1 LD_PRELOAD shim &middot; cf1 modprobe
+        (<code>algif_aead</code> family) &middot;
+        <code>RestrictNamespaces=~user ~net</code> on all 5 tenant
+        units (still blocks cf2/DF-ESP via the <code>unshare</code>
+        gate) &middot;
+        <code>RestrictAddressFamilies=~AF_ALG ~AF_RXRPC</code>
+        &middot; <code>99-rxrpc.conf</code> blacklist</td></tr>
+<tr><td><strong>AFS</strong></td>
+    <td><code>99-rxrpc.conf</code> + <code>12-rxrpc-af.conf</code>
+        (5 units)</td>
+    <td>cf1 LD_PRELOAD shim &middot; cf1 modprobe &middot;
+        <code>99-cf2-xfrm.conf</code> blacklist &middot;
+        <code>RestrictNamespaces=~user ~net</code> on all 5 units
+        (cf2/DF-ESP) &middot;
+        <code>RestrictAddressFamilies=~AF_ALG</code></td></tr>
+<tr><td><strong>Rootless containers</strong></td>
+    <td><code>15-userns.conf</code> on
+        <code>user@.service</code> only</td>
+    <td><code>sshd</code>/<code>cron</code>/<code>crond</code>/<code>atd</code>
+        keep <code>RestrictNamespaces=~user ~net</code>
+        (system-tier cf2/DF-ESP defense intact) &middot; cf1 shim
+        &middot; all modprobe blacklists &middot;
+        <code>AF_ALG</code>/<code>AF_RXRPC</code> restricts
+        everywhere</td></tr>
+</table>
+
+<h3>Inspect the decision</h3>
+<p>
+<code>%posttrans</code> writes a versioned JSON report to
+<code>/var/lib/copyfail-defense/auto-detect.json</code> after every
+install/upgrade and after every <code>copyfail-redetect</code> run:
+</p>
+<pre>{
+  "schema_version": "2",
+  "tool_version": "2.0.1",
+  "force_full": false,
+  "detected": {
+    "ipsec":               { "present": true,  "signals": ["systemctl: strongswan.service enabled"] },
+    "afs":                 { "present": false, "signals": [] },
+    "rootless_containers": { "present": true,  "signals": ["systemctl --user (alice): podman.socket enabled"] }
+  },
+  "suppressed": {
+    "modprobe_cf2_xfrm":      true,
+    "modprobe_rxrpc":         false,
+    "systemd_rxrpc_af":       false,
+    "systemd_userns_user_at": true
+  },
+  "applied": { "modprobe_cf1": true, "systemd_userns_sshd": true, "...": "..." }
+}</pre>
+<p>Other inspection paths:</p>
+<pre># Per-action log lines from %posttrans / copyfail-redetect
+sudo journalctl -t copyfail-defense-detect --since today
+
+# Auditor surface (SIEM-friendly)
+sudo copyfail-local-check --json | jq '.posture.auto_detect'
+# {"available": true, "suppressed_modprobe": ["cf2_xfrm"], "suppressed_systemd": ["userns_user_at"]}</pre>
+
+<h3>Re-detect or force full coverage</h3>
+<pre># Re-run detection after enabling IPsec/AFS/rootless post-install
+sudo /usr/sbin/copyfail-redetect
+sudo systemctl daemon-reload
+sudo systemctl try-reload-or-restart sshd.service
+
+# Skip detection entirely - apply every drop-in unconditionally
+sudo mkdir -p /etc/copyfail
+sudo touch /etc/copyfail/force-full
+sudo /usr/sbin/copyfail-redetect</pre>
+<p>
+The auditor reports <code>force-full sentinel active</code> when the
+sentinel is on. Remove the file and re-run
+<code>copyfail-redetect</code> to re-engage detection.
+</p>
 
 <h2 id="verify">Verify</h2>
 <pre># cf1: AF_ALG socket creation should fail
