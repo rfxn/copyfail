@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>copyfail-defense - DNF repository</title>
+<title>copyfail-defense: DNF repository</title>
 <meta name="description" content="Defense-in-depth toolkit for the Copy Fail Linux kernel bug class: CVE-2026-31431 (cf1 / algif_aead), cf2 (xfrm-ESP), and Dirty Frag (xfrm-ESP + RxRPC). LD_PRELOAD shim, kernel-module entry-point cuts, systemd RestrictAddressFamilies + RestrictNamespaces drop-ins, and a read-only host posture auditor with per-class coverage report. Packaged for EL8/EL9/EL10.">
 <style>
  body{font-family:system-ui,sans-serif;max-width:52rem;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#222}
@@ -27,8 +27,13 @@
  .ok{color:#0a4;font-weight:600}
  .warn{color:#a33;font-weight:600}
  .source-link{font-size:.9em;color:#666}
- td.cls-y{color:#0a4;font-weight:600;text-align:center}
- td.cls-n{color:#999;text-align:center}
+ .page-nav{font-size:.92em;margin:.5rem 0 1.2rem;color:#444}
+ .page-nav a{text-decoration:none;border-bottom:1px dotted #aaa}
+ .page-nav a:hover{border-bottom-color:#0a4}
+ td.cls-y{color:#0a4;font-weight:600;text-align:center;font-size:1.05em}
+ td.cls-n{color:#bbb;text-align:center}
+ td.cls-fn{color:#666;text-align:center;font-style:italic}
+ .footnotes{font-size:.9em;color:#555;margin:.4rem 0 1rem}
 </style>
 </head>
 <body>
@@ -52,10 +57,21 @@ report a problem: <a href="https://github.com/rfxn/copyfail/issues/new/choose">f
 <a href="https://github.com/rfxn/copyfail/releases">changelog</a>
 </div>
 
+<nav class="page-nav">
+  <a href="#install">Install</a> &middot;
+  <a href="#coverage">Coverage</a> &middot;
+  <a href="#verify">Verify</a> &middot;
+  <a href="#overrides">Overrides</a> &middot;
+  <a href="#json">JSON</a> &middot;
+  <a href="#downloads">Downloads</a> &middot;
+  <a href="#signing">Signing</a> &middot;
+  <a href="#defense">Defense in depth</a>
+</nav>
+
 <p class="lede">
-Defense-in-depth toolkit for the <strong>Copy Fail bug class</strong> -
+Defense-in-depth toolkit for the <strong>Copy Fail bug class</strong>:
 three live LPE chains that share the same <code>splice() &rarr;
-MSG_SPLICE_PAGES</code> page-cache write primitive:
+MSG_SPLICE_PAGES</code> page-cache write primitive.
 </p>
 
 <table>
@@ -89,12 +105,12 @@ host posture auditor</strong> that reports per-class coverage in JSON
 for SIEM ingest.
 </p>
 <p class="lede">
-&#x1F50D; <strong>Read the full writeup:</strong>
-<a href="https://www.rfxn.com/research/copyfail-cve-2026-31431"><strong>Copy Fail
-(CVE-2026-31431) on rfxn.com/research</strong></a> &mdash; kernel-level
-mechanics of the original AEAD over-read, the splice-into-page-cache
-path that turns it into a privesc primitive, and how the cf-class
-extends to the xfrm and RxRPC subsystems.
+&#x1F50D; <strong>Full writeup:</strong>
+<a href="https://www.rfxn.com/research/copyfail-cve-2026-31431"><strong>Copy
+Fail (CVE-2026-31431) on rfxn.com/research</strong></a> covers the cf1
+kernel mechanics; cf2 and Dirty Frag extend the same
+<code>splice()</code> &rarr; in-place-crypto primitive to two more
+sinks.
 </p>
 
 <div class="note">
@@ -105,11 +121,11 @@ metadata. The shim is still <strong>not auto-enabled</strong>;
 <code>copyfail-shim-enable</code> remains the explicit operator step.
 </div>
 
-<h2>Add the repo (EL8 / EL9 / EL10)</h2>
+<h2 id="install">Install</h2>
 <p>
-A single <code>copyfail.repo</code> file works for all three: dnf
-expands <code>$releasever</code> + <code>$basearch</code> per host, RPMs
-are GPG-signed, and the metadata itself is verified via detached
+A single <code>copyfail.repo</code> file works for EL8/EL9/EL10: dnf
+expands <code>$releasever</code> + <code>$basearch</code> per host. RPMs
+are GPG-signed and the metadata itself is verified via detached
 <code>repomd.xml.asc</code> (<code>gpgcheck=1</code> +
 <code>repo_gpgcheck=1</code>).
 </p>
@@ -133,51 +149,92 @@ sudo /usr/sbin/copyfail-shim-enable</pre>
     <td>read-only host posture auditor with per-class coverage report</td></tr>
 </table>
 
-<h2>Coverage matrix</h2>
-<p>Which rung in the package stops which bug-class:</p>
+<h2 id="coverage">Coverage matrix</h2>
+<p>
+Which rung blocks which bug class. <strong class="ok">&#x2713;</strong>
+= primary mitigation; <span style="color:#bbb">&middot;</span> = not
+applicable; superscripts mark caveated coverage (notes below).
+</p>
 <table>
-<tr><th>Layer</th><th>cf1</th><th>cf2</th><th>Dirty Frag-ESP</th><th>Dirty Frag-RxRPC</th></tr>
-<tr><td>LD_PRELOAD shim</td>
-    <td class="cls-y">primary</td><td class="cls-n">&mdash;</td>
-    <td class="cls-n">&mdash;</td><td class="cls-n">incidental</td></tr>
+<tr><th>Mitigation rung</th><th>cf1</th><th>cf2</th><th>DF-ESP</th><th>DF-RxRPC</th></tr>
+<tr><td>LD_PRELOAD shim (<code>AF_ALG</code> hook)</td>
+    <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td>
+    <td class="cls-n">&middot;</td><td class="cls-fn">&sup1;</td></tr>
 <tr><td><code>modprobe</code> <code>algif_aead</code> family</td>
-    <td class="cls-y">yes (modular)</td><td class="cls-n">&mdash;</td>
-    <td class="cls-n">&mdash;</td><td class="cls-n">&mdash;</td></tr>
-<tr><td><code>modprobe</code> <code>esp4</code>/<code>esp6</code>/<code>xfrm_user</code>/<code>xfrm_algo</code></td>
-    <td class="cls-n">&mdash;</td><td class="cls-y">yes</td>
-    <td class="cls-y">yes</td><td class="cls-n">&mdash;</td></tr>
+    <td class="cls-fn">&sup2;</td><td class="cls-n">&middot;</td>
+    <td class="cls-n">&middot;</td><td class="cls-n">&middot;</td></tr>
+<tr><td><code>modprobe</code> <code>esp4 esp6 xfrm_user xfrm_algo</code></td>
+    <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td>
+    <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td></tr>
 <tr><td><code>modprobe</code> <code>rxrpc</code></td>
-    <td class="cls-n">&mdash;</td><td class="cls-n">&mdash;</td>
-    <td class="cls-n">&mdash;</td><td class="cls-y">yes</td></tr>
+    <td class="cls-n">&middot;</td><td class="cls-n">&middot;</td>
+    <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td></tr>
 <tr><td>systemd <code>RestrictAddressFamilies=~AF_ALG</code></td>
-    <td class="cls-y">yes</td><td class="cls-n">&mdash;</td>
-    <td class="cls-n">&mdash;</td><td class="cls-n">&mdash;</td></tr>
+    <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td>
+    <td class="cls-n">&middot;</td><td class="cls-n">&middot;</td></tr>
 <tr><td>systemd <code>RestrictAddressFamilies=~AF_RXRPC</code></td>
-    <td class="cls-n">&mdash;</td><td class="cls-n">&mdash;</td>
-    <td class="cls-n">&mdash;</td><td class="cls-y">yes</td></tr>
+    <td class="cls-n">&middot;</td><td class="cls-n">&middot;</td>
+    <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td></tr>
 <tr><td>systemd <code>RestrictNamespaces=~user ~net</code></td>
-    <td class="cls-n">&mdash;</td><td class="cls-y">yes</td>
-    <td class="cls-y">yes</td><td class="cls-n">&mdash;</td></tr>
-<tr><td>Suid lockdown <code>chmod 4750 /usr/bin/su</code></td>
-    <td class="cls-n">&mdash;</td><td class="cls-y">target</td>
-    <td class="cls-y">target</td><td class="cls-n">&mdash;</td></tr>
-<tr><td>Page-cache integrity probe (auditor)</td>
-    <td class="cls-y">cached IOC</td><td class="cls-y">cached IOC</td>
-    <td class="cls-y">cached IOC</td><td class="cls-y">cached IOC</td></tr>
-<tr><td>Audit telemetry (auditor remediation)</td>
-    <td class="cls-y"><code>a0=38</code></td>
-    <td class="cls-y"><code>unshare</code></td>
-    <td class="cls-y"><code>unshare</code></td>
-    <td class="cls-y"><code>add_key("rxrpc",...)</code></td></tr>
-<tr><td>Kernel patch</td>
-    <td class="cls-y"><code>a664bf3d</code></td>
-    <td class="cls-y"><code>f4c50a4034</code></td>
-    <td class="cls-y"><code>f4c50a4034</code></td>
-    <td class="cls-n">none upstream</td></tr>
+    <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td>
+    <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td></tr>
+</table>
+<p class="footnotes">
+<sup>1</sup> Catches the <code>cksum</code> step in the public DF-RxRPC
+PoC, not the kernel sink itself; defense-in-depth, not a primary stop.<br>
+<sup>2</sup> No-op on RHEL stock kernels (<code>CRYPTO_USER_API*</code>
+is built-in, so the blacklist line cannot prevent load). Listed for
+completeness on custom or non-RHEL kernels where <code>algif_aead</code>
+ships modular.
+</p>
+
+<h3>Reference: kernel patches and audit signatures</h3>
+<table>
+<tr><th>Class</th><th>Upstream patch</th><th>Audit signature</th></tr>
+<tr><td>cf1</td><td><code>a664bf3d</code></td><td><code>socket(a0=38)</code></td></tr>
+<tr><td>cf2</td><td><code>f4c50a4034</code></td><td><code>unshare(NEWUSER)</code></td></tr>
+<tr><td>DF-ESP</td><td><code>f4c50a4034</code></td><td><code>unshare(NEWUSER)</code></td></tr>
+<tr><td>DF-RxRPC</td><td>none upstream</td><td><code>add_key("rxrpc",...)</code></td></tr>
+</table>
+<p>
+The auditor probes page-cache integrity for <code>/usr/bin/su</code>
+and the PAM stacks every class targets, as a cached-IOC for an
+in-flight exploit. See <code>--json</code>
+<code>posture.bug_classes[*].kernel_sink</code>.
+</p>
+
+<h3>Operator-applied (auditor-recommended)</h3>
+<p>
+The auditor flags these via <code>--emit-remediation</code>; no
+subpackage applies them, since each can break legitimate workloads on a
+busy fleet. Review before pasting.
+</p>
+<table>
+<tr><th>Action</th><th>Targets</th><th>When recommended</th></tr>
+<tr><td><code>chmod 4750 /usr/bin/su &amp;&amp; chgrp wheel /usr/bin/su</code></td>
+    <td>cf2, DF-ESP</td>
+    <td>Suppressed when non-wheel/admin interactive users exist
+        (cPanel-style tenant fleets); chmod 4750 would break their
+        <code>su</code> workflow.</td></tr>
+<tr><td><code>auditd</code> rule <code>cf_userns</code>
+        (<code>unshare(CLONE_NEWUSER)</code>)</td>
+    <td>cf2, DF-ESP</td>
+    <td>Hosts where <code>auditd</code> is tuned for userns events
+        (otherwise high alert noise).</td></tr>
+<tr><td><code>auditd</code> rule <code>cf_addkey</code>
+        (<code>add_key("rxrpc",...)</code>)</td>
+    <td>DF-RxRPC</td>
+    <td>Always; rxrpc keyring activity is rare enough that the
+        false-positive rate stays low.</td></tr>
+<tr><td><code>auditd</code> rule <code>afalg_attempt</code>
+        (<code>socket(a0=38)</code>)</td>
+    <td>cf1</td>
+    <td>Hosts already running <code>auditd</code>; pairs with the
+        LD_PRELOAD shim as a tripwire.</td></tr>
 </table>
 
-<h3>Verify the install</h3>
-<pre># cf1 - AF_ALG socket creation should fail
+<h2 id="verify">Verify</h2>
+<pre># cf1: AF_ALG socket creation should fail
 python3 -c 'import socket; socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)'
 # expect: PermissionError [Errno 1] Operation not permitted
 
@@ -191,7 +248,7 @@ sudo copyfail-local-check
 #     Dirty Frag-ESP       YES              yes         modprobe_blacklist, systemd_restrict_ns
 #     Dirty Frag-RxRPC     YES              yes         modprobe_blacklist, systemd_af_rxrpc</pre>
 
-<h2>Override paths</h2>
+<h2 id="overrides">Override paths</h2>
 <p>
 The default install applies <code>RestrictNamespaces=~user ~net</code>
 to <code>user@.service</code>. This <strong>breaks rootless
@@ -224,7 +281,7 @@ Same logic for <strong>AFS</strong> (<code>openafs</code>,
 <code>kafs</code>) and the <code>rxrpc</code> blacklist line.
 </p>
 
-<h2>Auditor JSON (v2.0 schema)</h2>
+<h2 id="json">Auditor JSON (v2.0 schema)</h2>
 <pre>{
   "schema_version": "2.0",
   "covers": ["CVE-2026-31431", "cf2-xfrm-esp", "dirtyfrag-esp", "dirtyfrag-rxrpc"],
@@ -245,10 +302,10 @@ Same logic for <strong>AFS</strong> (<code>openafs</code>,
 ("is this host hardened?"). The <code>bug_classes</code> map exposes
 per-layer breakdown for finer dashboards. Exit codes <code>0</code>
 clean, <code>2</code> VULN, <code>3</code> VULN-but-mitigated,
-<code>4</code> hardening recommendations only - unchanged from v1.0.x.
+<code>4</code> hardening recommendations only (unchanged from v1.0.x).
 </p>
 
-<h2>Direct downloads</h2>
+<h2 id="downloads">Direct downloads</h2>
 <p>
 Each release on
 <a href="https://github.com/rfxn/copyfail/releases/latest">github.com/rfxn/copyfail/releases</a>
@@ -267,7 +324,7 @@ support clean <code>dnf upgrade</code> from <code>afalg-defense</code>.
 <p>
 <strong>Per-EL binary RPMs are independently compiled against each
 distribution's glibc</strong> (EL8: 2.28 with split <code>libdl</code>;
-EL9/EL10: 2.34+ with merged <code>libdl</code>) - do not cross-install
+EL9/EL10: 2.34+ with merged <code>libdl</code>); do not cross-install
 across ELs.
 </p>
 
@@ -328,7 +385,7 @@ the repo trees through the 2.0.x release line for clean
 <code>dnf upgrade</code> compatibility. Removed in v2.0.1.
 </p>
 
-<h2>Signing</h2>
+<h2 id="signing">Signing</h2>
 <p>
 v1.0.1 and later are signed by the <strong>Copyfail Project Signing Key</strong>:
 </p>
@@ -350,7 +407,11 @@ rpm --import https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail
 rpm -K /path/to/copyfail-defense-2.0.0-1.el9.x86_64.rpm
 # expect: digests signatures OK</pre>
 
-<h2>Defense-in-depth: why each rung carries weight</h2>
+<h2 id="defense">Defense in depth</h2>
+<p>
+Each rung defeats the bug by a different mechanism, so an attack that
+defeats one does not necessarily defeat the next.
+</p>
 <table>
 <tr><th>Rung</th><th>Where it fails</th><th>What the next rung covers</th></tr>
 <tr><td>Kernel patch (vendor)</td>
@@ -372,7 +433,7 @@ rpm -K /path/to/copyfail-defense-2.0.0-1.el9.x86_64.rpm
 
 <h2>Reporting issues</h2>
 <p>
-Bugs, packaging problems, false positives, missing distros - please
+Bugs, packaging problems, false positives, missing distros: please
 <a href="https://github.com/rfxn/copyfail/issues/new/choose">file a
 GitHub issue</a>. Include the auditor's <code>--json</code> output if
 the report is about detection, and the output of
