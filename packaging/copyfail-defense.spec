@@ -408,7 +408,7 @@ exit 0
 %pretrans modprobe
 old=/etc/modprobe.d/99-copyfail-defense.conf
 if [ -f "$old" ] && \
-   rpm -q copyfail-defense-modprobe --qf '%{version}' 2>/dev/null \
+   rpm -q copyfail-defense-modprobe --qf '%%{version}' 2>/dev/null \
        | grep -q '^2\.0\.0$'; then
     mv -f "$old" "${old}.rpmsave-v2.0.1"
     logger -t copyfail-defense -p authpriv.info \
@@ -419,7 +419,7 @@ exit 0
 
 # %pretrans systemd - same logic, five files.
 %pretrans systemd
-if rpm -q copyfail-defense-systemd --qf '%{version}' 2>/dev/null \
+if rpm -q copyfail-defense-systemd --qf '%%{version}' 2>/dev/null \
        | grep -q '^2\.0\.0$'; then
     for u in user@ sshd cron crond atd; do
         f="/etc/systemd/system/${u}.service.d/10-copyfail-defense.conf"
@@ -681,6 +681,23 @@ exit 0
   markers and fails loudly if any appear. Closes the gap that let
   2.0.1-1 ship without a final dnf-from-gh-pages canary catching
   this class of bug.
+- spec: %pretrans modprobe and %pretrans systemd were querying
+  `rpm -q ... --qf '%{version}'` with an unescaped %{version} - RPM
+  expanded the macro at build time to the literal new-package
+  version (e.g. '2.0.1'), so the rpm-q always returned that string
+  regardless of what was installed, and the v2.0.0 -> v2.0.1
+  monolithic-file rename guard never fired. Switched to '%%{version}'
+  so RPM emits a literal %{version} into the scriptlet body and the
+  rpm-q queries the *currently-installed* version. Bug present in
+  2.0.1-1; only surfaced on this hotfix's gh-pages-staging canary.
+- packaging/test-repo.sh fixes: (a) `mp_count=$(grep -ch ... 3 files)`
+  produced a multi-line per-file count, breaking `[ -eq 9 ]` - swap
+  to cat-then-grep for a single integer; (b) the systemd_only
+  scenario asserted -modprobe was NOT pulled, but the meta package
+  Requires all four subpackages (umbrella semantics for
+  `dnf install copyfail-defense`), so -modprobe IS always pulled
+  transitively - removed the inverted assertion and assert presence
+  instead.
 
 * Fri May 08 2026 rfxn.com <proj@rfxn.com> - 1:2.0.1-1
 - v2.0.1 hotfix: auto-detect IPsec / AFS / rootless-container

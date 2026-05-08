@@ -150,10 +150,12 @@ for u in containerd docker podman; do
 done
 ok "all expected files installed (subs + active dropins + opt-in examples)"
 
-# 3b. Modprobe drop file content - 9 module entries.
-# Regex tolerates column-aligned whitespace in the source conf.
-mp_count=$(grep -chE '^install +(algif_aead|authenc|authencesn|af_alg|esp4|esp6|xfrm_user|xfrm_algo|rxrpc) +/bin/false' \
-    /etc/modprobe.d/99-copyfail-defense-{cf1,cf2-xfrm,rxrpc}.conf 2>/dev/null || echo 0)
+# 3b. Modprobe drop file content - 9 module entries summed across the
+# split files. Use cat-then-grep so the count is a single integer;
+# `grep -c` against multiple files emits one count per file, which
+# breaks `[ "$n" -eq 9 ]`.
+mp_count=$(cat /etc/modprobe.d/99-copyfail-defense-{cf1,cf2-xfrm,rxrpc}.conf 2>/dev/null \
+    | grep -cE '^install +(algif_aead|authenc|authencesn|af_alg|esp4|esp6|xfrm_user|xfrm_algo|rxrpc) +/bin/false')
 [ "$mp_count" -eq 9 ] \
     || fail "modprobe drop file has $mp_count install lines, expected 9"
 ok "modprobe drop file has all 9 cf-class module install lines"
@@ -828,14 +830,17 @@ dnf install -y python3 jq >/dev/null 2>&1 || true
 dnf install -y copyfail-defense-systemd 2>&1 | tee /tmp/dnf.log | tail -10
 assert_no_scriptlet_fail /tmp/dnf.log
 
-# Meta must have been pulled (hard Requires).
+# Meta must have been pulled (hard Requires from -systemd).
 rpm -q copyfail-defense >/dev/null 2>&1 \
     || fail "meta package not pulled by -systemd alone (Requires chain broken)"
-# -modprobe must NOT be installed (we didn't ask for it).
-if rpm -q copyfail-defense-modprobe >/dev/null 2>&1; then
-    fail "-modprobe was pulled despite installing only -systemd (test invalid)"
-fi
-ok "rpm topology: meta + -systemd installed; -modprobe absent"
+# Note: the meta package itself has Requires on all four subpackages
+# (shim/modprobe/systemd/auditor), so installing any single subpackage
+# transitively pulls the whole umbrella. The M-2 canary's value here
+# is "meta + detect.sh land via the Requires chain", not "subpackages
+# can be cherry-picked" - the latter would require dropping meta's
+# subpackage Requires, which would change install semantics for every
+# operator who runs `dnf install copyfail-defense`.
+ok "rpm topology: -systemd request pulled meta (Requires chain intact)"
 
 # detect.sh must be present (meta-owned).
 test -x /usr/libexec/copyfail-defense/detect.sh \
@@ -865,12 +870,15 @@ for u in user@ sshd cron crond atd; do
 done
 ok "12-/15-* conditional drop-ins applied via meta-owned detect.sh"
 
-# Modprobe drop files must NOT be present (we did not install -modprobe).
+# With meta's subpackage Requires, -modprobe IS pulled transitively,
+# so its drop files SHOULD be present. The original v2.0.1 fixup
+# wording assumed -modprobe could be omitted; that's not the case
+# under the umbrella Requires.
 for f in cf1 cf2-xfrm rxrpc; do
-    test ! -f "/etc/modprobe.d/99-copyfail-defense-${f}.conf" \
-        || fail "modprobe ${f} drop present despite -modprobe NOT being installed"
+    test -f "/etc/modprobe.d/99-copyfail-defense-${f}.conf" \
+        || fail "modprobe ${f} drop missing (expected via meta umbrella Requires)"
 done
-ok "modprobe drops absent (correct: -modprobe not installed)"
+ok "modprobe drops present (pulled transitively via meta umbrella)"
 
 echo "=== SYSTEMD-ONLY (M-2) OK ==="
 INNER
