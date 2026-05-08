@@ -141,6 +141,9 @@ PRIV_CONFIG_FILES = [
 ]
 PRIV_CONFIG_ROOT_FILES = ["/etc/shadow", "/etc/gshadow"]
 
+AUTO_DETECT_PATH = "/var/lib/copyfail-defense/auto-detect.json"
+AUTO_DETECT_SCHEMA_VERSION = "2"
+
 # v2.0.0: cf-class kernel-module entry-points the modprobe subpackage
 # should cover. Used by check_modprobe_blacklist_extended.
 CF_CLASS_MODULES = [
@@ -1400,6 +1403,114 @@ def check_modprobe_blacklist_extended():
                              "/etc/modprobe.d/99-copyfail-defense.conf with "
                              "'install <mod> /bin/false' for each missing.")
 
+def _rpm_q_installed(pkg):
+    """Returncode-based check: rpm -q <pkg> exits 0 iff installed.
+    Per D-45 / reviewer M-9: file-existence checks misclassify hosts
+    where a subpackage is installed but its drop-in file got
+    hand-removed or its scriptlet failed silently. rpm -q is the
+    authoritative source."""
+    try:
+        rc = subprocess.run(["rpm", "-q", pkg],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL).returncode
+        return rc == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+def check_auto_detect_state():
+    """v2.0.1: report auto-detection result from
+    /var/lib/copyfail-defense/auto-detect.json (written by detect.sh).
+
+    OK if no workloads detected (or force_full set).
+    INFO if workloads detected and conditional mitigations suppressed
+         (the package working as designed).
+    WARN if the JSON is missing on a host where the modprobe or
+         systemd subpackage is installed (scriptlet failed silently),
+         OR if the schema_version is unrecognized (D-53 / M-3).
+    SKIP if neither subpackage is installed (auditor-only install).
+
+    Rev 2 fixup: SKIP test uses rpm -q (D-45 / M-9) not file-existence;
+    schema rejection emits posture.auto_detect.schema_unrecognized=true
+    (D-53 / M-3)."""
+    have_modprobe = _rpm_q_installed("copyfail-defense-modprobe")
+    have_systemd = _rpm_q_installed("copyfail-defense-systemd")
+
+    if not (have_modprobe or have_systemd):
+        return Check("auto_detect_state", "MITIGATION", Status.SKIP,
+                     "auditor-only install (no -modprobe or -systemd)")
+
+    try:
+        with open(AUTO_DETECT_PATH, "r") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return Check("auto_detect_state", "MITIGATION", Status.WARN,
+                     "auto-detect.json missing; %posttrans likely failed",
+                     remediation="Run: /usr/sbin/copyfail-redetect")
+    except (json.JSONDecodeError, OSError) as e:
+        return Check("auto_detect_state", "MITIGATION", Status.WARN,
+                     "auto-detect.json unreadable: {}".format(e),
+                     remediation="Run: /usr/sbin/copyfail-redetect")
+
+    # json.load() succeeds for any valid JSON value: list, null, string,
+    # number. Only a top-level object exposes .get(). Reject everything
+    # else as "schema unrecognized" rather than letting AttributeError
+    # crash the auditor.
+    if not isinstance(data, dict):
+        return Check("auto_detect_state", "MITIGATION", Status.WARN,
+                     "auto-detect.json is not a JSON object",
+                     details={
+                         "path": str(AUTO_DETECT_PATH),
+                         "type": type(data).__name__,
+                         "schema_unrecognized": True,
+                     },
+                     remediation="Run: /usr/sbin/copyfail-redetect")
+
+    schema = data.get("schema_version")
+    if schema != AUTO_DETECT_SCHEMA_VERSION:
+        # D-53 / M-3: structured field for SIEM filtering.
+        return Check("auto_detect_state", "MITIGATION", Status.WARN,
+                     "auto-detect.json schema {} unrecognized "
+                     "(expected {})".format(schema, AUTO_DETECT_SCHEMA_VERSION),
+                     details={
+                         "schema": schema,
+                         "schema_unrecognized": True,
+                     })
+
+    detected = data.get("detected") or {}
+    if not isinstance(detected, dict):
+        detected = {}
+    detected_workloads = sorted([
+        k for k, v in detected.items()
+        if isinstance(v, dict) and v.get("present") is True
+    ])
+    suppressed = data.get("suppressed") or {}
+    if not isinstance(suppressed, dict):
+        suppressed = {}
+    suppressed_mits = sorted([
+        k for k, v in suppressed.items() if v is True
+    ])
+    force_full = bool(data.get("force_full"))
+
+    details = {
+        "detected_workloads": detected_workloads,
+        "suppressed_mitigations": suppressed_mits,
+        "force_full": force_full,
+        "schema_unrecognized": False,
+    }
+
+    if force_full:
+        return Check("auto_detect_state", "MITIGATION", Status.OK,
+                     "force-full sentinel active; all mitigations applied",
+                     details=details)
+    if not detected_workloads:
+        return Check("auto_detect_state", "MITIGATION", Status.OK,
+                     "auto-detect: no conflicting workloads",
+                     details=details)
+    return Check("auto_detect_state", "MITIGATION", Status.INFO,
+                 "auto-detect: {} ({} mitigation(s) suppressed)".format(
+                     ", ".join(detected_workloads), len(suppressed_mits)),
+                 details=details)
+
 def _unit_namespaces_blocked(rn_value):
     """Returns True if RestrictNamespaces blocks BOTH user and net.
 
@@ -1924,6 +2035,9 @@ def run_all_checks(args):
     # v2.0.0: cf-class extended modprobe coverage
     PROGRESS.step("scanning modprobe.d for cf-class extended coverage")
     add_one(check_modprobe_blacklist_extended(), "MITIGATION")
+    # v2.0.1: auto-detect.json state
+    PROGRESS.step("reading auto-detect.json state")
+    add_one(check_auto_detect_state(), "MITIGATION")
     PROGRESS.step("checking kernel.modules_disabled")
     add_one(check_modules_disabled(), "MITIGATION")
     # v2.0.0: initcall_blacklist= GRUB-line check (CERT-EU 2026-005 +
@@ -2042,11 +2156,35 @@ def determine_posture(results, category_filter_active=False):
     else:
         covered = sorted([cls for cls, info in bug_classes.items()
                           if info.get("mitigated") is True])
+    auto_detect_summary = _summarize_auto_detect(by_name)
     return {
         "verdict": verdict,
         "layers": layers,
         "bug_classes": bug_classes,
         "bug_classes_covered": covered,
+        "auto_detect": auto_detect_summary,
+    }
+
+def _summarize_auto_detect(by_name):
+    """v2.0.1: summarize auto_detect_state check for posture surface.
+
+    Returns the summarized fields the SIEM/dashboard wants without
+    embedding the full raw JSON file - that's what the .details on
+    the underlying check carries.
+
+    Rev 2 fixup (D-53 / M-3): exposes schema_unrecognized field for
+    SIEM to filter on schema-rejection events without parsing the
+    raw JSON file."""
+    r = by_name.get("auto_detect_state")
+    if r is None or r.status == Status.SKIP:
+        return {"available": False}
+    details = r.details or {}
+    return {
+        "available": True,
+        "force_full": details.get("force_full", False),
+        "detected_workloads": details.get("detected_workloads", []),
+        "suppressed_mitigations": details.get("suppressed_mitigations", []),
+        "schema_unrecognized": details.get("schema_unrecognized", False),
     }
 
 def _aggregate_bug_classes(by_name):
@@ -2384,6 +2522,23 @@ def main():
                     mit_str = colorize("NO", C.RED)
                     lay_str = colorize("(none)", C.RED)
             print("  {:<16} {:<20} {:<15} {}".format(label, reach, mit_str, lay_str))
+        # v2.0.1: auto-detect summary line.
+        ad = posture_summary.get("auto_detect", {})
+        if ad.get("available"):
+            if ad.get("force_full"):
+                ad_line = "force-full sentinel active (all mitigations applied)"
+            elif ad.get("detected_workloads"):
+                workloads = ", ".join(ad["detected_workloads"])
+                suppressed = ad.get("suppressed_mitigations", [])
+                if suppressed:
+                    ad_line = "{} (suppressed: {})".format(
+                        workloads, ", ".join(suppressed))
+                else:
+                    ad_line = workloads
+            else:
+                ad_line = "clean (no conflicts)"
+            print()
+            print(colorize("Auto-detect:", C.BOLD), ad_line)
         print()
         # Single-line scan-friendly summary (kept for log-tailers / SIEM grep)
         def _bc_repr(cls_id):

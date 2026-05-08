@@ -33,11 +33,10 @@ per-class coverage. Signed RPMs for EL8 / EL9 / EL10.
 ---
 
 > [!NOTE]
-> Upgrading from `afalg-defense` v1.0.x is a single command:
-> `dnf upgrade copyfail-defense`. The `Obsoletes:`/`Provides:` chain
-> performs the rename swap automatically and pulls in the new
-> subpackages. The shim is **still not auto-enabled**; activation
-> remains an explicit operator step.
+> Upgrading from `afalg-defense` v1.0.x or `copyfail-defense` v2.0.0 is a single
+> command: `dnf upgrade copyfail-defense`. The v2.0.0 -> v2.0.1 path
+> auto-suppresses any conflicting drop-ins detected on your host
+> (see Auto-detection below).
 
 ---
 
@@ -258,18 +257,78 @@ download links + sha256s:
 
 ---
 
-## Override paths
+## Auto-detection of conflicting workloads
 
-Three workload classes legitimately need the surfaces this package
-restricts: **rootless podman/buildah**, **IPsec**, and **AFS**. Each
-has a per-unit opt-out below.
+v2.0.1+ inspects the host at install time for workloads the default
+cuts would break, and **suppresses the conflicting drop-in only**
+while keeping every other layer active.
 
-The default install applies `RestrictNamespaces=~user ~net` to
-`user@.service` (and other tenant units). This **breaks rootless
-podman/buildah** under `user@.service`. To opt out per-unit:
+Three workload classes are detected:
+
+| Workload | Detection signals (any) | Suppresses |
+|---|---|---|
+| **IPsec** (strongSwan, libreswan, openswan) | `systemctl is-enabled` returns enabled for strongswan/strongswan-starter/strongswan-swanctl/ipsec/libreswan/openswan/pluto; OR `/etc/ipsec.conf` has a `conn` stanza; OR non-empty `/etc/swanctl/conf.d/`, `/etc/ipsec.d/`, `/etc/strongswan/conf.d/`, `/etc/strongswan.d/` | `99-copyfail-defense-cf2-xfrm.conf` (esp4, esp6, xfrm_user, xfrm_algo blacklist) |
+| **AFS** (openafs, kafs) | `systemctl is-enabled` for openafs-client/openafs-server/kafs/afsd; OR `/etc/openafs/CellServDB` or `/etc/openafs/ThisCell` exists; OR `/etc/krb5.conf.d/openafs*` exists; OR `/proc/fs/afs/` registered | `99-copyfail-defense-rxrpc.conf` (rxrpc modprobe blacklist) AND `12-copyfail-defense-rxrpc-af.conf` (RestrictAddressFamilies=~AF_RXRPC on all 5 tenant units) - preserves AFS userspace tooling like aklog |
+| **Rootless containers** (rootless podman/buildah) | `/home/*/.local/share/containers/storage/overlay-containers/` present (rootless podman storage tree, recent mtime); OR `/var/lib/containers/storage/` non-empty with mtime <90d; OR `/run/user/<UID>/containers/` for any UID >= 1000; OR `podman.socket` enabled (system or per-user) | `15-copyfail-defense-userns.conf` on `user@.service.d` ONLY (other tenant units stay protected) |
+
+Note: `/etc/subuid` populated by `useradd` is NOT a rootless
+detection signal in v2.0.1 rev 2 - shadow-utils auto-populates
+subuid for every regular user regardless of container intent,
+which produced near-100% false positives on cPanel-shaped fleets.
+The detection now requires *active rootless usage* (storage tree,
+runtime tmpfs, or enabled podman.socket).
+
+Detection runs in `%posttrans` after every install/upgrade and writes
+a structured report to `/var/lib/copyfail-defense/auto-detect.json`
+(schema versioned). The auditor consumes this and surfaces the
+decision under `posture.auto_detect`.
+
+### Re-detect after the host changes
+
+If you enable IPsec / AFS / rootless containers post-install:
 
 ```sh
-sudo install -d /etc/systemd/system/user@.service.d
+sudo /usr/sbin/copyfail-redetect
+sudo systemctl daemon-reload
+sudo systemctl try-reload-or-restart sshd.service
+```
+
+The helper re-runs detection, refreshes `auto-detect.json`, and
+copies/removes the conditional drop-in files in `/etc/`. It does
+NOT auto-reload systemd - the operator decides when running
+services pick up the change.
+
+### Force full install (skip detection)
+
+Drop a sentinel file before `dnf install` (or before
+`copyfail-redetect`) to skip detection entirely:
+
+```sh
+sudo mkdir -p /etc/copyfail
+sudo touch /etc/copyfail/force-full
+sudo dnf install -y copyfail-defense
+```
+
+The auditor reports `force-full sentinel active` when this is on.
+Remove the sentinel and re-run `copyfail-redetect` to re-engage
+detection.
+
+### Manual override (finer than detection)
+
+systemd drop-ins use the standard layered-override pattern.
+Within a `<unit>.service.d/` directory, files merge in
+lexicographic order, and **lower numbers lose to higher numbers
+for `=value` directives** (later files override earlier ones).
+copyfail-defense ships at `10-`, `12-`, `15-`; the standard
+operator escape hatches sit at `20-` and `25-`:
+
+**`20-override.conf` (empty-value to neutralize a directive):**
+drop a `20-override.conf` next to our files with empty values for
+any directive you want to relax. Survives package upgrade because
+`20-override.conf` is operator-owned (RPM doesn't manage it).
+
+```sh
+sudo mkdir -p /etc/systemd/system/user@.service.d
 sudo tee /etc/systemd/system/user@.service.d/20-override.conf >/dev/null <<'EOF'
 [Service]
 RestrictNamespaces=
@@ -278,43 +337,39 @@ EOF
 sudo systemctl daemon-reload
 ```
 
-The `99-` prefix on the modprobe drop and the `10-` prefix on systemd
-drop-ins are deliberate: any `20-*.conf` drop-in you add overrides
-ours.
+Empty `=` clears the union for list-valued directives like
+`RestrictAddressFamilies` and `RestrictNamespaces`.
 
-If your fleet legitimately uses **IPsec** (strongSwan, libreswan,
-FRRouting), the modprobe subpackage's blacklist of `esp4`/`esp6`/
-`xfrm_user`/`xfrm_algo` will break those workloads. Either skip the
-modprobe subpackage:
-
-```sh
-sudo dnf install copyfail-defense-shim copyfail-defense-systemd \
-                 copyfail-defense-auditor
-# (omit copyfail-defense and copyfail-defense-modprobe)
-```
-
-…or remove the relevant entries from `/etc/modprobe.d/99-copyfail-defense.conf`
-(the file is `%config(noreplace)`, so your edit survives package upgrade).
-
-Same logic for **AFS** (`openafs`, `kafs`) and the `rxrpc` blacklist line.
-
-If your fleet runs **rootless or userns-remapped containers** under
-`containerd`/`docker`/`podman` service units, the default install does
-NOT touch those by design. Container-runtime drop-ins ship as
-opt-in examples under `/usr/share/doc/copyfail-defense/examples/` for
-operators who have confirmed no rootless workloads:
+**`25-additions.conf` (add a new directive on top of ours):**
+drop a `25-additions.conf` next to our files with directives you
+want to *add*. Sorts after `20-` so it can layer on top of an
+empty-override. Use this for fleet-wide hardening that goes
+beyond the cf-class scope.
 
 ```sh
-for u in containerd docker podman; do
-    sudo install -d /etc/systemd/system/${u}.service.d
-    sudo cp /usr/share/doc/copyfail-defense/examples/containers-dropin.conf \
-            /etc/systemd/system/${u}.service.d/10-copyfail-defense.conf
-done
+sudo tee /etc/systemd/system/sshd.service.d/25-additions.conf >/dev/null <<'EOF'
+[Service]
+NoNewPrivileges=true
+EOF
 sudo systemctl daemon-reload
+sudo systemctl try-reload-or-restart sshd.service
 ```
+
+**modprobe override**: the conditional `99-copyfail-defense-cf2-xfrm.conf`
+and `99-copyfail-defense-rxrpc.conf` files are managed by detect.sh
+(cmp-and-skip per [SPEC §12.10.2a / D-57]). If you hand-edit a
+conditional file, detect.sh detects the divergence on next
+`%posttrans` or `copyfail-redetect`, logs a WARN, and **preserves
+your edits** (does not overwrite). For the always-on
+`99-copyfail-defense-cf1.conf` file, edits survive package upgrade
+via `%config(noreplace)`.
+
+The earlier (incorrect) recommendation to `chattr +i` a managed
+file is **removed** - it broke dnf via EPERM on the next
+`install -m 0644` from `%posttrans`. Use the cmp-and-skip
+behavior or `force-full` instead.
 
 ---
-
 ## Verifying signatures
 
 1.0.1+ and 2.0.0+ are signed by the **Copyfail Project Signing Key**.
@@ -333,7 +388,7 @@ Out-of-band verification of a downloaded RPM:
 ```sh
 curl -sSL https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail \
   | sudo rpm --import /dev/stdin
-rpm -K copyfail-defense-2.0.0-1.el9.x86_64.rpm
+rpm -K copyfail-defense-2.0.1-1.el9.x86_64.rpm
 # expect: digests signatures OK
 ```
 
@@ -356,7 +411,12 @@ rpm -K copyfail-defense-2.0.0-1.el9.x86_64.rpm
       "dirtyfrag-esp":   { "applicable": true, "mitigated": true,  "kernel_sink": "...", "layers": {...} },
       "dirtyfrag-rxrpc": { "applicable": true, "mitigated": false, "kernel_sink": "...", "layers": {...} }
     },
-    "layers": { ... }
+    "layers": { ... },
+    "auto_detect": {
+      "available": true,
+      "suppressed_modprobe": [],
+      "suppressed_systemd": []
+    }
   }
 }
 ```
@@ -389,7 +449,7 @@ To rebuild the RPMs from the published SRPM (under your own signing):
 
 ```sh
 mock -r centos-stream+epel-9-x86_64 --rebuild \
-  https://github.com/rfxn/copyfail/releases/download/v2.0.0/copyfail-defense-2.0.0-1.el9.src.rpm
+  https://github.com/rfxn/copyfail/releases/download/v2.0.1/copyfail-defense-2.0.1-1.el9.src.rpm
 ```
 
 The spec lives at `packaging/copyfail-defense.spec`.

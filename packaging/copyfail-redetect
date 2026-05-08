@@ -1,0 +1,34 @@
+#!/bin/bash
+#
+# copyfail-redetect
+#   Re-run copyfail-defense workload detection on demand.
+#   Use after enabling IPsec / AFS / rootless containers post-install
+#   to refresh the conditional drop-in state.
+#
+# The helper does NOT call systemctl daemon-reload; the operator
+# decides reload timing (a daemon-reload is required before systemd
+# drop-in changes take effect on running services).
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "copyfail-redetect: must be run as root" >&2
+    exit 1
+fi
+
+if [ ! -x /usr/libexec/copyfail-defense/detect.sh ]; then
+    echo "copyfail-redetect: /usr/libexec/copyfail-defense/detect.sh missing" >&2
+    echo "  (re-install copyfail-defense-modprobe or -systemd to restore)" >&2
+    exit 1
+fi
+
+# Pass scope=both per D-56: operator-driven re-detect updates both
+# modprobe and systemd state regardless of which subpackage's
+# %posttrans last fired.
+/usr/libexec/copyfail-defense/detect.sh apply both
+echo
+echo "Detection refreshed. State: /var/lib/copyfail-defense/auto-detect.json"
+echo
+echo "If conditional systemd drop-ins changed, run:"
+echo "    systemctl daemon-reload"
+echo "    systemctl try-reload-or-restart sshd.service"
+echo "to apply the change to running services."

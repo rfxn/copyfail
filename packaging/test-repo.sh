@@ -1,11 +1,12 @@
 #!/bin/bash
+# shellcheck disable=SC2317
 #
 # test-repo.sh
 #   End-to-end verification of the published copyfail-defense
 #   dnf repository on EL8 / EL9 / EL10. Uses podman; everything happens
 #   inside disposable containers - no host-side state is touched.
 #
-# What this exercises (v2.0.0 - 18 checks per EL):
+# What this exercises (v2.0.1 fixup pass - 27 checks per EL):
 #   1. The .repo file is reachable on gh-pages
 #   2. dnf can fetch repodata, validate the detached repomd.xml.asc
 #      against the published gpgkey, and resolve the meta package
@@ -21,7 +22,7 @@
 #  11. copyfail-shim-disable removes the line atomically
 #  12. dnf remove leaves /etc/ld.so.preload sane (preun scriptlet)
 #  v2.0.0 additions:
-#  13. copyfail-defense-modprobe drops /etc/modprobe.d/99-copyfail-defense.conf
+#  13. copyfail-defense-modprobe drops split modprobe conf files (cf1/cf2-xfrm/rxrpc)
 #  14. copyfail-defense-systemd drops 5 active drop files for tenant units
 #  15. Container-runtime drop-ins shipped as examples/, NOT active
 #  16. Auditor JSON has posture.bug_classes_covered (array)
@@ -29,6 +30,17 @@
 #  17. Auditor exit code in {0, 3, 4} (never 2 - shim disabled by default)
 #  18. Upgrade-path test: afalg-defense 1.0.1 -> copyfail-defense 2.0.0
 #      via Obsoletes/Provides; old name fully removed.
+#  v2.0.1 additions:
+#  19. clean_host: all 3 modprobe + 10 systemd files present; auto-detect.json clean
+#  20. ipsec_host: cf2-xfrm correctly suppressed; JSON flags ipsec; signals[] has 2 entries (M-1 canary)
+#  21. afs_host: rxrpc + rxrpc-af suppressed across all 5 units; JSON flags afs
+#  22. rootless_host: user@ 15-userns suppressed; 12-rxrpc-af applied; JSON correct
+#  23. subuid_no_storage: subuid+passwd alone does NOT trip rootless detection (cPanel FP)
+#  24. force_full: all mitigations applied despite all signals tripping
+#  25. redetect: post-install AFS signal triggers correct refresh via copyfail-redetect
+#  26. split_upgrade: v2.0.0->v2.0.1 pretrans correctly renames monolithic files
+#  v2.0.1 fixup-pass additions:
+#  27. systemd_only: install -systemd alone still pulls meta; detect.sh runs (M-2 canary)
 #
 # Usage:
 #   bash test-repo.sh                 # all three ELs
@@ -101,8 +113,10 @@ test -f /usr/lib64/no-afalg.so          || fail "shim .so missing"
 test -x /usr/sbin/copyfail-shim-enable  || fail "enable helper missing"
 test -x /usr/sbin/copyfail-shim-disable || fail "disable helper missing"
 test -x /usr/sbin/copyfail-local-check  || fail "auditor missing"
-test -f /etc/modprobe.d/99-copyfail-defense.conf \
-    || fail "modprobe drop file missing"
+for f in cf1 cf2-xfrm rxrpc; do
+    test -f "/etc/modprobe.d/99-copyfail-defense-${f}.conf" \
+        || fail "modprobe ${f} drop file missing"
+done
 test -f /etc/systemd/system/sshd.service.d/10-copyfail-defense.conf \
     || fail "sshd systemd drop-in missing"
 test -f /etc/systemd/system/user@.service.d/10-copyfail-defense.conf \
@@ -119,8 +133,8 @@ ok "all expected files installed (subs + active dropins + opt-in examples)"
 
 # 3b. Modprobe drop file content - 9 module entries.
 # Regex tolerates column-aligned whitespace in the source conf.
-mp_count=$(grep -cE '^install +(algif_aead|authenc|authencesn|af_alg|esp4|esp6|xfrm_user|xfrm_algo|rxrpc) +/bin/false' \
-    /etc/modprobe.d/99-copyfail-defense.conf 2>/dev/null || echo 0)
+mp_count=$(grep -chE '^install +(algif_aead|authenc|authencesn|af_alg|esp4|esp6|xfrm_user|xfrm_algo|rxrpc) +/bin/false' \
+    /etc/modprobe.d/99-copyfail-defense-{cf1,cf2-xfrm,rxrpc}.conf 2>/dev/null || echo 0)
 [ "$mp_count" -eq 9 ] \
     || fail "modprobe drop file has $mp_count install lines, expected 9"
 ok "modprobe drop file has all 9 cf-class module install lines"
@@ -217,9 +231,11 @@ if [ -f /etc/ld.so.preload ]; then
     grep -Fxq /usr/lib64/no-afalg.so /etc/ld.so.preload \
         && fail "preun left dangling shim line in /etc/ld.so.preload"
 fi
-# Modprobe drop file removed on full erase
-[ ! -f /etc/modprobe.d/99-copyfail-defense.conf ] \
-    || fail "modprobe drop file remained after dnf remove"
+# Modprobe drop files removed on full erase
+for f in cf1 cf2-xfrm rxrpc; do
+    [ ! -f "/etc/modprobe.d/99-copyfail-defense-${f}.conf" ] \
+        || fail "modprobe ${f} drop file remained after dnf remove"
+done
 # systemd drop files removed (RPM owns them via %config)
 [ ! -f /etc/systemd/system/sshd.service.d/10-copyfail-defense.conf ] \
     || fail "sshd systemd drop-in remained after dnf remove"
@@ -272,8 +288,8 @@ new_count=$(rpm -qa | grep -c '^copyfail-defense' || true)
 [ "$new_count" -eq 5 ] || fail "expected 5 copyfail-defense* RPMs, got $new_count"
 
 # Assert: new files in expected locations
-test -f /etc/modprobe.d/99-copyfail-defense.conf \
-    || fail "modprobe drop missing post-upgrade"
+test -f /etc/modprobe.d/99-copyfail-defense-cf1.conf \
+    || fail "modprobe cf1 drop missing post-upgrade"
 test -f /etc/systemd/system/sshd.service.d/10-copyfail-defense.conf \
     || fail "sshd systemd drop-in missing post-upgrade"
 test -x /usr/sbin/copyfail-local-check \
@@ -296,6 +312,478 @@ print('post-upgrade bug_classes_covered:', d['posture']['bug_classes_covered'])
 
 ok "upgrade afalg-defense-1.0.1 -> copyfail-defense-2.0.0 succeeded (exit_rc=$audit_rc)"
 echo "=== UPGRADE PATH OK ==="
+INNER
+}
+
+# v2.0.1: detection scenario tests. Each pre-stages a workload
+# fingerprint, installs copyfail-defense, and asserts the right
+# conditional drop files landed/didn't.
+
+run_clean_host_test_in() {
+    local image="$1"
+    podman run --rm -i --network=host \
+        -e REPO_URL="$REPO_URL" -e KEY_URL="$KEY_URL" \
+        "$image" /bin/bash <<'INNER'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok:   $*"; }
+
+curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
+dnf install -y python3 jq >/dev/null 2>&1 || true
+dnf install -y copyfail-defense 2>&1 | tail -5
+
+# All 3 modprobe files present
+for f in cf1 cf2-xfrm rxrpc; do
+    test -f "/etc/modprobe.d/99-copyfail-defense-${f}.conf" \
+        || fail "modprobe ${f} drop missing on clean host"
+done
+# All 5 always-on (10-) drop files
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/10-copyfail-defense.conf" \
+        || fail "10-* drop missing for ${u}"
+done
+# All 5 conditional (12-rxrpc-af) drop files (rev 2: AFS-gated, present on clean host)
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/12-copyfail-defense-rxrpc-af.conf" \
+        || fail "12-rxrpc-af drop missing for ${u} on clean host"
+done
+# All 5 conditional (15-) drop files (clean host = no suppression)
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/15-copyfail-defense-userns.conf" \
+        || fail "15-* drop missing for ${u} on clean host"
+done
+# auto-detect.json present and reports nothing
+test -f /var/lib/copyfail-defense/auto-detect.json \
+    || fail "auto-detect.json missing"
+jq -e '.schema_version == "2" and
+       .detected.ipsec.present == false and
+       .detected.afs.present == false and
+       .detected.rootless_containers.present == false' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "auto-detect.json reports workloads on clean host (or wrong schema)"
+ok "clean host: all 18 drop files present + JSON reports clean"
+echo "=== CLEAN HOST OK ==="
+INNER
+}
+
+run_ipsec_host_test_in() {
+    local image="$1"
+    podman run --rm -i --network=host \
+        -e REPO_URL="$REPO_URL" -e KEY_URL="$KEY_URL" \
+        "$image" /bin/bash <<'INNER'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok:   $*"; }
+
+# Pre-stage TWO IPsec signals BEFORE installing the package. Per
+# v2.0.1 fixup M-1, the JSON signals[] field must be a list of N
+# entries, not a single concatenated string. A single signal would
+# never have caught the bash NUL-stripping bug, so this test
+# deliberately stages two and asserts len(signals.ipsec) >= 2.
+mkdir -p /etc /etc/strongswan/conf.d
+cat >/etc/ipsec.conf <<'EOC'
+# libreswan-style stub
+conn home
+    left=192.0.2.1
+    right=192.0.2.2
+    auto=add
+EOC
+# Second signal: non-empty conf in a strongswan conf.d directory.
+cat >/etc/strongswan/conf.d/local.conf <<'EOC'
+# strongswan-style stub
+charon { send_vendor_id = yes }
+EOC
+
+curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
+dnf install -y python3 jq >/dev/null 2>&1 || true
+dnf install -y copyfail-defense 2>&1 | tail -5
+
+# cf2-xfrm SUPPRESSED, cf1 + rxrpc PRESENT
+test ! -f /etc/modprobe.d/99-copyfail-defense-cf2-xfrm.conf \
+    || fail "cf2-xfrm drop file present despite IPsec signal"
+test -f /etc/modprobe.d/99-copyfail-defense-cf1.conf \
+    || fail "cf1 drop file (always-on) missing"
+test -f /etc/modprobe.d/99-copyfail-defense-rxrpc.conf \
+    || fail "rxrpc drop file (unrelated to IPsec) missing"
+# JSON should flag ipsec
+jq -e '.detected.ipsec.present == true and
+       .suppressed.modprobe_cf2_xfrm == true' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "auto-detect.json missing IPsec/suppression flags"
+# v2.0.1 fixup M-1 canary: the signals[] array must be a JSON list of
+# DISTINCT entries, not a single concatenated string. Bash NUL-stripping
+# in command substitution previously collapsed N signals to 1 merged
+# string. We staged 2 signals; assert >=2 entries.
+ipsec_signal_count=$(jq -r '.detected.ipsec.signals | length' \
+    /var/lib/copyfail-defense/auto-detect.json)
+[ "$ipsec_signal_count" -ge 2 ] \
+    || fail "ipsec.signals has $ipsec_signal_count entries, expected >=2 (NUL-marshalling bug?)"
+# Confirm each entry is a non-empty distinct string, not the concatenation.
+jq -e '.detected.ipsec.signals | all(type == "string" and length > 0)' \
+    /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "ipsec.signals entries must each be non-empty strings"
+ok "ipsec host: cf2-xfrm correctly suppressed; signals array has $ipsec_signal_count distinct entries"
+echo "=== IPSEC HOST OK ==="
+INNER
+}
+
+run_afs_host_test_in() {
+    local image="$1"
+    podman run --rm -i --network=host \
+        -e REPO_URL="$REPO_URL" -e KEY_URL="$KEY_URL" \
+        "$image" /bin/bash <<'INNER'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok:   $*"; }
+
+mkdir -p /etc/openafs
+echo "lan.example.com" > /etc/openafs/ThisCell
+
+curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
+dnf install -y python3 jq >/dev/null 2>&1 || true
+dnf install -y copyfail-defense 2>&1 | tail -5
+
+test ! -f /etc/modprobe.d/99-copyfail-defense-rxrpc.conf \
+    || fail "rxrpc drop file present despite AFS signal"
+test -f /etc/modprobe.d/99-copyfail-defense-cf1.conf \
+    || fail "cf1 drop file missing"
+test -f /etc/modprobe.d/99-copyfail-defense-cf2-xfrm.conf \
+    || fail "cf2-xfrm drop file (unrelated to AFS) missing"
+# Rev 2: 12-rxrpc-af also suppressed for ALL 5 units on AFS hosts.
+for u in user@ sshd cron crond atd; do
+    test ! -f "/etc/systemd/system/${u}.service.d/12-copyfail-defense-rxrpc-af.conf" \
+        || fail "12-rxrpc-af present for ${u} despite AFS signal"
+done
+# The 10-* and 15-* drops still present (AFS doesn't suppress those).
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/10-copyfail-defense.conf" \
+        || fail "10-* drop missing for ${u} on AFS host"
+    test -f "/etc/systemd/system/${u}.service.d/15-copyfail-defense-userns.conf" \
+        || fail "15-userns drop missing for ${u} on AFS host"
+done
+jq -e '.detected.afs.present == true and
+       .suppressed.modprobe_rxrpc == true and
+       .suppressed.systemd_rxrpc_af == true' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "auto-detect.json missing AFS/suppression flags"
+ok "afs host: rxrpc + rxrpc-af correctly suppressed across all 5 units"
+echo "=== AFS HOST OK ==="
+INNER
+}
+
+run_rootless_host_test_in() {
+    local image="$1"
+    podman run --rm -i --network=host \
+        -e REPO_URL="$REPO_URL" -e KEY_URL="$KEY_URL" \
+        "$image" /bin/bash <<'INNER'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok:   $*"; }
+
+# Rev 2 fixup (reviewer C-1): pre-stage the storage-tree signal
+# (canonical podman rootless fingerprint), NOT /etc/subuid (which
+# has near-100% FP rate on cPanel hosts and was dropped from the
+# signal set). The /etc/subuid line is preserved here only as a
+# negative test: it should NOT trip detection on its own.
+useradd -m -u 1000 alice 2>/dev/null || true
+echo "alice:100000:65536" >> /etc/subuid    # negative test - does NOT trip
+
+# Positive test: stage the storage tree that podman creates on
+# first rootless container run. detect.sh signal 1 fires here.
+install -d -o alice -g alice -m 0700 \
+    /home/alice/.local/share/containers/storage/overlay-containers
+# Touch with recent mtime so the -mtime -180 gate passes.
+touch /home/alice/.local/share/containers/storage/overlay-containers
+
+curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
+dnf install -y python3 jq >/dev/null 2>&1 || true
+dnf install -y copyfail-defense 2>&1 | tail -5
+
+# 15-userns DROP for user@ ONLY; sshd/cron/crond/atd 15-* PRESENT;
+# all 10-* PRESENT; all 3 modprobe files PRESENT.
+test ! -f /etc/systemd/system/user@.service.d/15-copyfail-defense-userns.conf \
+    || fail "user@ 15-userns drop present despite rootless signal"
+for u in sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/15-copyfail-defense-userns.conf" \
+        || fail "${u} 15-userns drop missing (should be applied)"
+done
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/10-copyfail-defense.conf" \
+        || fail "${u} 10-* always-on drop missing"
+done
+# Rev 2: 12-rxrpc-af present for all 5 units on rootless-only host
+# (AFS not detected, so AF_RXRPC cut applies).
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/12-copyfail-defense-rxrpc-af.conf" \
+        || fail "${u} 12-rxrpc-af drop missing on rootless-only host"
+done
+for f in cf1 cf2-xfrm rxrpc; do
+    test -f "/etc/modprobe.d/99-copyfail-defense-${f}.conf" \
+        || fail "modprobe ${f} drop missing"
+done
+jq -e '.detected.rootless_containers.present == true and
+       .suppressed.systemd_userns_user_at == true and
+       .suppressed.systemd_rxrpc_af == false' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "auto-detect.json missing rootless/suppression flags"
+# Negative test: with subuid populated but storage tree missing,
+# rev 2 detect.sh should NOT trip (cPanel-FP fix per C-1). We can't
+# easily verify this via jq because the storage tree IS present
+# above; instead, install a 2nd container without the storage tree
+# to confirm subuid alone doesn't trip. (Test #22b below.)
+ok "rootless host: user@ 15-userns suppressed; 12-rxrpc-af applied"
+echo "=== ROOTLESS HOST OK ==="
+INNER
+}
+
+# Rev 2 fixup test (reviewer C-1): subuid alone must NOT trip
+# rootless detection. cPanel hosts have hundreds of regular users
+# with auto-populated /etc/subuid; if subuid alone tripped detection,
+# the userns cut would be suppressed on every cPanel install,
+# inverting the protection guarantee. This test asserts the cPanel-
+# shaped fixture (regular user + populated subuid, NO storage tree)
+# does NOT detect rootless.
+run_subuid_no_storage_test_in() {
+    local image="$1"
+    podman run --rm -i --network=host \
+        -e REPO_URL="$REPO_URL" -e KEY_URL="$KEY_URL" \
+        "$image" /bin/bash <<'INNER'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok:   $*"; }
+
+# cPanel-shaped fixture: regular users + subuid, but NO podman
+# storage tree, NO /run/user containers, NO podman.socket.
+for i in 1 2 3 4 5; do
+    useradd -m -u "$((1000 + i))" "cpuser${i}" 2>/dev/null || true
+    echo "cpuser${i}:$((100000 + i*65536)):65536" >> /etc/subuid
+    echo "cpuser${i}:$((100000 + i*65536)):65536" >> /etc/subgid
+done
+# Crucially: do NOT create /home/cpuser*/.local/share/containers/.
+
+curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
+dnf install -y python3 jq >/dev/null 2>&1 || true
+dnf install -y copyfail-defense 2>&1 | tail -5
+
+# Detection must report rootless=false despite the populated subuid.
+jq -e '.detected.rootless_containers.present == false and
+       .suppressed.systemd_userns_user_at == false' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "subuid alone tripped rootless detection (cPanel FP regression)"
+# user@ 15-userns must be PRESENT (cut applies on cPanel-shaped host).
+test -f /etc/systemd/system/user@.service.d/15-copyfail-defense-userns.conf \
+    || fail "user@ 15-userns missing despite no rootless signal"
+ok "subuid+passwd alone does not trip rootless detection (C-1 cPanel FP fix)"
+echo "=== SUBUID-NO-STORAGE OK ==="
+INNER
+}
+
+run_force_full_test_in() {
+    local image="$1"
+    podman run --rm -i --network=host \
+        -e REPO_URL="$REPO_URL" -e KEY_URL="$KEY_URL" \
+        "$image" /bin/bash <<'INNER'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok:   $*"; }
+
+# Pre-stage all three signals AND force-full sentinel.
+# Rev 2: rootless signal switched from /etc/subuid to storage-tree
+# (per C-1), so we must stage the actual storage path.
+mkdir -p /etc/openafs /etc/copyfail
+printf 'conn home\n    left=192.0.2.1\n' > /etc/ipsec.conf
+echo "lan.example.com" > /etc/openafs/ThisCell
+useradd -m -u 1000 alice 2>/dev/null || true
+install -d -o alice -g alice -m 0700 \
+    /home/alice/.local/share/containers/storage/overlay-containers
+touch /etc/copyfail/force-full
+
+curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
+dnf install -y python3 jq >/dev/null 2>&1 || true
+dnf install -y copyfail-defense 2>&1 | tail -5
+
+# ALL files should be present despite all three signals tripping.
+for f in cf1 cf2-xfrm rxrpc; do
+    test -f "/etc/modprobe.d/99-copyfail-defense-${f}.conf" \
+        || fail "modprobe ${f} suppressed despite force-full"
+done
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/15-copyfail-defense-userns.conf" \
+        || fail "15-userns suppressed for ${u} despite force-full"
+    # Rev 2: 12-rxrpc-af also force-applied.
+    test -f "/etc/systemd/system/${u}.service.d/12-copyfail-defense-rxrpc-af.conf" \
+        || fail "12-rxrpc-af suppressed for ${u} despite force-full"
+done
+jq -e '.force_full == true' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "auto-detect.json force_full not set"
+ok "force-full sentinel: all mitigations applied despite signals"
+echo "=== FORCE-FULL OK ==="
+INNER
+}
+
+run_redetect_test_in() {
+    local image="$1"
+    podman run --rm -i --network=host \
+        -e REPO_URL="$REPO_URL" -e KEY_URL="$KEY_URL" \
+        "$image" /bin/bash <<'INNER'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok:   $*"; }
+
+curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
+dnf install -y python3 jq >/dev/null 2>&1 || true
+dnf install -y copyfail-defense 2>&1 | tail -5
+
+# Clean install: all 3 modprobe files + 5+5 systemd files.
+test -f /etc/modprobe.d/99-copyfail-defense-rxrpc.conf \
+    || fail "rxrpc drop file missing pre-redetect"
+
+# Now create AFS signal AND re-run detection
+mkdir -p /etc/openafs
+echo "lan.example.com" > /etc/openafs/ThisCell
+/usr/sbin/copyfail-redetect
+
+# rxrpc drop should now be GONE; cf1 + cf2-xfrm preserved.
+test ! -f /etc/modprobe.d/99-copyfail-defense-rxrpc.conf \
+    || fail "rxrpc drop persisted after redetect on AFS host"
+test -f /etc/modprobe.d/99-copyfail-defense-cf1.conf \
+    || fail "cf1 drop removed by redetect (should be always-on)"
+jq -e '.detected.afs.present == true' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "auto-detect.json not updated by redetect"
+ok "redetect: AFS signal newly applied; rxrpc suppressed"
+echo "=== REDETECT OK ==="
+INNER
+}
+
+# v2.0.1 fixup M-2 canary: install -systemd WITHOUT -modprobe.
+# detect.sh + /usr/libexec/copyfail-defense/ + /var/lib/copyfail-defense/
+# moved from -modprobe %files to meta %files. Both -modprobe and
+# -systemd hard-Require meta. This test asserts that installing
+# -systemd alone still pulls meta (and its detect.sh), so the
+# %posttrans actually fires and produces auto-detect.json + 12-/15-*
+# drop-ins. Pre-fixup, this scenario silently no-op'd because
+# detect.sh did not land on disk.
+run_systemd_only_test_in() {
+    local image="$1"
+    podman run --rm -i --network=host \
+        -e REPO_URL="$REPO_URL" -e KEY_URL="$KEY_URL" \
+        "$image" /bin/bash <<'INNER'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok:   $*"; }
+
+curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
+dnf install -y python3 jq >/dev/null 2>&1 || true
+
+# Install ONLY -systemd (and let dnf pull meta as a hard Require).
+# We deliberately do NOT pull -modprobe/-shim/-auditor.
+dnf install -y copyfail-defense-systemd 2>&1 | tail -10
+
+# Meta must have been pulled (hard Requires).
+rpm -q copyfail-defense >/dev/null 2>&1 \
+    || fail "meta package not pulled by -systemd alone (Requires chain broken)"
+# -modprobe must NOT be installed (we didn't ask for it).
+if rpm -q copyfail-defense-modprobe >/dev/null 2>&1; then
+    fail "-modprobe was pulled despite installing only -systemd (test invalid)"
+fi
+ok "rpm topology: meta + -systemd installed; -modprobe absent"
+
+# detect.sh must be present (meta-owned).
+test -x /usr/libexec/copyfail-defense/detect.sh \
+    || fail "detect.sh missing on -systemd-only install (M-2 regression)"
+ok "detect.sh present (meta-owned)"
+
+# auto-detect.json must have been written by -systemd's %posttrans.
+test -f /var/lib/copyfail-defense/auto-detect.json \
+    || fail "auto-detect.json missing on -systemd-only install (%posttrans no-op'd?)"
+jq -e '.schema_version == "2"' /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "auto-detect.json malformed on -systemd-only install"
+ok "auto-detect.json written and parses"
+
+# 10-* always-on drop-ins for all 5 tenant units.
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/10-copyfail-defense.conf" \
+        || fail "10-* drop missing for ${u} on -systemd-only install"
+done
+ok "10-* always-on drops applied for all 5 tenant units"
+
+# 12-/15-* conditional drop-ins land on a clean host (no IPsec/AFS/rootless).
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/12-copyfail-defense-rxrpc-af.conf" \
+        || fail "12-rxrpc-af missing for ${u} on -systemd-only install (M-2 canary)"
+    test -f "/etc/systemd/system/${u}.service.d/15-copyfail-defense-userns.conf" \
+        || fail "15-userns missing for ${u} on -systemd-only install (M-2 canary)"
+done
+ok "12-/15-* conditional drop-ins applied via meta-owned detect.sh"
+
+# Modprobe drop files must NOT be present (we did not install -modprobe).
+for f in cf1 cf2-xfrm rxrpc; do
+    test ! -f "/etc/modprobe.d/99-copyfail-defense-${f}.conf" \
+        || fail "modprobe ${f} drop present despite -modprobe NOT being installed"
+done
+ok "modprobe drops absent (correct: -modprobe not installed)"
+
+echo "=== SYSTEMD-ONLY (M-2) OK ==="
+INNER
+}
+
+run_split_upgrade_test_in() {
+    local image="$1"
+    podman run --rm -i --network=host \
+        -e REPO_URL="$REPO_URL" -e KEY_URL="$KEY_URL" \
+        "$image" /bin/bash <<'INNER'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok:   $*"; }
+
+curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
+dnf install -y python3 jq >/dev/null 2>&1 || true
+
+# Install v2.0.0 explicitly. If the repo no longer has v2.0.0, SKIP.
+if dnf install -y 'copyfail-defense-2.0.0*' 2>&1 | tail -5; then
+    test -f /etc/modprobe.d/99-copyfail-defense.conf \
+        || fail "v2.0.0 monolithic modprobe file missing"
+    test -f /etc/systemd/system/sshd.service.d/10-copyfail-defense.conf \
+        || fail "v2.0.0 sshd drop missing"
+    ok "v2.0.0 baseline installed"
+else
+    echo "SKIP: copyfail-defense-2.0.0 not in repo (one-cycle expired)"
+    exit 77
+fi
+
+# Upgrade to 2.0.1
+dnf upgrade -y copyfail-defense 2>&1 | tail -10
+
+# v2.0.0 monolithic file MUST be gone from its original path
+# (pretrans renamed it to .rpmsave-v2.0.1 per rev 2 D-37).
+test ! -f /etc/modprobe.d/99-copyfail-defense.conf \
+    || fail "v2.0.0 monolithic modprobe file still at original path after upgrade"
+# And the .rpmsave-v2.0.1 SHOULD exist (rev 2 preserves operator
+# hand-edits via rename; the file is inert / RPM doesn't consult it).
+test -f /etc/modprobe.d/99-copyfail-defense.conf.rpmsave-v2.0.1 \
+    || fail "v2.0.0 monolithic file not renamed to .rpmsave-v2.0.1 (D-37 broken)"
+# All v2.0.1 split files present (clean host = no suppression)
+for f in cf1 cf2-xfrm rxrpc; do
+    test -f "/etc/modprobe.d/99-copyfail-defense-${f}.conf" \
+        || fail "v2.0.1 split file ${f} missing post-upgrade"
+done
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/10-copyfail-defense.conf" \
+        || fail "10-* drop for ${u} missing post-upgrade"
+    test -f "/etc/systemd/system/${u}.service.d/12-copyfail-defense-rxrpc-af.conf" \
+        || fail "12-rxrpc-af drop for ${u} missing post-upgrade"
+    test -f "/etc/systemd/system/${u}.service.d/15-copyfail-defense-userns.conf" \
+        || fail "15-* drop for ${u} missing post-upgrade"
+    # Rev 2: the .rpmsave-v2.0.1 from systemd %pretrans should also exist.
+    test -f "/etc/systemd/system/${u}.service.d/10-copyfail-defense.conf.rpmsave-v2.0.1" \
+        || fail "${u} v2.0.0 monolithic systemd drop not renamed to .rpmsave-v2.0.1"
+done
+test -f /var/lib/copyfail-defense/auto-detect.json \
+    || fail "auto-detect.json missing post-upgrade"
+ok "v2.0.0 -> v2.0.1 split-file upgrade clean"
+echo "=== SPLIT-UPGRADE OK ==="
 INNER
 }
 
@@ -360,6 +848,24 @@ for el in "${ELS[@]}"; do
         77) RESULT[$el]="${RESULT[$el]} +upgrade$(c_dim SKIP)" ;;
         *)  RESULT[$el]="${RESULT[$el]} +upgrade$(c_red FAIL)"; overall_rc=1 ;;
     esac
+
+    # v2.0.1: detection scenario tests (rev 2: + subuid_no_storage;
+    # fixup pass: + systemd_only for M-2 canary).
+    for scenario_name in clean_host ipsec_host afs_host rootless_host \
+                         subuid_no_storage \
+                         force_full redetect split_upgrade \
+                         systemd_only; do
+        echo
+        step "${scenario_name} test"
+        scenario_rc=0
+        "run_${scenario_name}_test_in" "$image" || scenario_rc=$?
+        case "$scenario_rc" in
+            0)  RESULT[$el]="${RESULT[$el]} +${scenario_name}$(c_green OK)" ;;
+            77) RESULT[$el]="${RESULT[$el]} +${scenario_name}$(c_dim SKIP)" ;;
+            *)  RESULT[$el]="${RESULT[$el]} +${scenario_name}$(c_red FAIL)"
+                overall_rc=1 ;;
+        esac
+    done
     echo
 done
 

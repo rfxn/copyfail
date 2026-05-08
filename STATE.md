@@ -4,12 +4,16 @@ Snapshot: **2026-05-08**
 
 ## Latest release
 
-- **v2.0.0** — `copyfail-defense` umbrella covering cf1 (CVE-2026-31431),
-  cf2 (xfrm-ESP), and Dirty Frag (xfrm-ESP + RxRPC). Renamed from
-  `afalg-defense`. Signed RPMs, EL8 / EL9 / EL10, x86_64 only.
-- Tag: <https://github.com/rfxn/copyfail/releases/tag/v2.0.0>
+- **v2.0.1** — hotfix adding auto-detection of conflicting workloads
+  (IPsec, AFS, rootless containers) at install time. Conditional
+  modprobe/systemd drop-ins suppressed when a workload is detected.
+  Adds `copyfail-redetect` helper and `check_auto_detect_state` auditor
+  check. Signed RPMs, EL8 / EL9 / EL10, x86_64 only.
+- Tag: <https://github.com/rfxn/copyfail/releases/tag/v2.0.1>
+- v2.0.0 RPMs retained in repo trees for upgrade path
+  (`dnf upgrade copyfail-defense`).
 - v1.0.1 RPMs retained in repo trees for one cycle (clean
-  `dnf upgrade afalg-defense → copyfail-defense` path).
+  `dnf upgrade afalg-defense -> copyfail-defense` path).
 - v1.0.0 was rolled back (was unsigned baseline; deleted from GH releases).
 
 ## Distribution
@@ -45,12 +49,13 @@ sudo dnf upgrade -y copyfail-defense
 |---|---|---|
 | `copyfail-defense` (meta) | x86_64 | requires shim + modprobe + systemd + auditor |
 | `copyfail-defense-shim` | x86_64 | `/usr/lib64/no-afalg.so`, `/usr/sbin/copyfail-shim-{enable,disable}` |
-| `copyfail-defense-modprobe` | noarch | `/etc/modprobe.d/99-copyfail-defense.conf` |
-| `copyfail-defense-systemd` | noarch | `/etc/systemd/system/{user@,sshd,cron,crond,atd}.service.d/10-copyfail-defense.conf` + `examples/containers-dropin.conf` |
+| `copyfail-defense-modprobe` | noarch | `/etc/modprobe.d/99-copyfail-defense-cf1.conf` (always-on) + cf2-xfrm + rxrpc (conditional via detect.sh) |
+| `copyfail-defense-systemd` | noarch | `/etc/systemd/system/{user@,sshd,cron,crond,atd}.service.d/10-copyfail-defense.conf` (always-on) + rxrpc-af (12-*, conditional) + userns (15-*, conditional) |
 | `copyfail-defense-auditor` | noarch | `/usr/sbin/copyfail-local-check` |
 
 `Epoch: 1` introduced in 2.0.0; `Obsoletes:` / `Provides: afalg-defense*`
-metadata retained through 2.0.x release line.
+metadata retained through 2.0.x release line. `/usr/sbin/copyfail-redetect`
+added in 2.0.1 (ships in meta package).
 
 Per-EL binary RPMs are independently compiled against each
 distribution's glibc (EL8: 2.28; EL9/10: 2.34+).
@@ -91,8 +96,10 @@ uid:          Copyfail Project Signing Key <proj@rfxn.com>
 
 - Spec: `packaging/copyfail-defense.spec`
 - Helper scripts: `packaging/copyfail-shim-{enable,disable}`
-- Active dropins source: `packaging/copyfail-{modprobe,systemd-dropin}.conf`
+- Active dropins source: `packaging/copyfail-modprobe-{cf1,cf2-xfrm,rxrpc}.conf`, `packaging/copyfail-systemd-dropin{,-rxrpc-af,-userns}.conf`
 - Container-runtime example dropin source: `packaging/copyfail-systemd-dropin-containers.conf`
+- Workload detection helper: `packaging/copyfail-defense-detect.sh`
+- Operator re-detect helper: `packaging/copyfail-redetect`
 - `.repo` source: `packaging/copyfail.repo`
 - Public key source: `packaging/RPM-GPG-KEY-copyfail`
 - Build invocation: `rpmbuild --define "_topdir /home/copyfail/rpmbuild" -ba packaging/copyfail-defense.spec`
@@ -104,9 +111,9 @@ uid:          Copyfail Project Signing Key <proj@rfxn.com>
 
 ## Test harness
 
-`packaging/test-repo.sh` — podman-driven, **18 checks per EL** (was 12 in
-v1.0.1; v2.0.0 adds modprobe + systemd-dropin + bug_classes JSON +
-upgrade-path tests).
+`packaging/test-repo.sh` — podman-driven, **26 checks per EL** (was 18 in
+v2.0.0; v2.0.1 adds detection-scenario tests for IPsec/AFS/rootless/clean
+host + redetect helper + auto_detect auditor JSON).
 
 ```sh
 bash packaging/test-repo.sh           # all three ELs
@@ -136,15 +143,41 @@ JSON output gains `posture.bug_classes_covered` (SIEM-ergonomic array)
 and `posture.bug_classes` (per-class map with kernel_sink + per-layer
 booleans). Exit codes unchanged from v1.0.1.
 
+v2.0.1 adds `posture.auto_detect` with `available`, `suppressed_modprobe`,
+and `suppressed_systemd` fields. Available only when
+`/var/lib/copyfail-defense/auto-detect.json` schema version 2 is present.
+
+## Auto-detection (v2.0.1+)
+
+`/usr/libexec/copyfail-defense/detect.sh` runs during `%posttrans` for
+modprobe and systemd subpackages. It writes
+`/var/lib/copyfail-defense/auto-detect.json` (schema version 2) and
+conditionally installs or suppresses drop files.
+
+| Signal | Source | Suppresses |
+|---|---|---|
+| IPsec (xfrm/esp) | kernel modules loaded; ipsec.conf/nss db | cf2-xfrm modprobe conf |
+| AFS | kafs module; afs mount | rxrpc modprobe conf + rxrpc-af systemd drop-in |
+| rootless containers | storage-tree: `~/.local/share/containers/storage` | userns systemd drop-in (user@ only) |
+
+`/usr/sbin/copyfail-redetect` — operator-callable wrapper; re-runs
+`detect.sh apply both`. Required after enabling a workload post-install.
+Does NOT call `systemctl daemon-reload` — operator decides reload timing.
+
+`/etc/copyfail/force-full` — sentinel file; when present, detection is
+skipped and all mitigations applied unconditionally.
+
 ## Safety properties enforced by the spec
 
 - `%post` does **not** touch `/etc/ld.so.preload` — operator must run `copyfail-shim-enable`.
 - `copyfail-shim-enable` smoke-tests the .so against `/bin/true` before writing the preload file.
 - `%preun shim` on full erase scrubs `/etc/ld.so.preload` *before* RPM removes the .so (otherwise every dyn-linked binary fails to dlopen the missing preload — brick).
 - `%posttrans shim` warns if the file ever ends up dangling.
-- `%post modprobe` does best-effort `rmmod` + LOG_AUTHPRIV trail; failures silenced.
-- `%preun modprobe` removes drop file but does NOT rmmod (uninstall must be reversible).
-- `%post systemd` only `daemon-reload` + try-reload sshd; never restart other services.
+- `%post modprobe` does best-effort `rmmod` of cf1 modules + LOG_AUTHPRIV trail; failures silenced.
+- `%posttrans modprobe` calls `detect.sh apply modprobe`; best-effort rmmod of cf2/rxrpc if suppressed.
+- `%postun modprobe` calls `detect.sh teardown modprobe` (or inline fallback); removes all drop files.
+- `%posttrans systemd` calls `detect.sh apply systemd`; daemon-reload.
+- `%postun systemd` calls `detect.sh teardown systemd` (or inline fallback); daemon-reload.
 - All shipped conf files marked `%config(noreplace)` — operator hand-edits survive package upgrade.
 - ExclusiveArch: x86_64 (the .c source has `#error` for non-x86_64).
 - Both `gpgcheck=1` and `repo_gpgcheck=1` enforced in the published `.repo`.
@@ -167,8 +200,9 @@ posture without re-implementing verdict logic.
 
 ## Cross-repo state
 
-- `rfxn/copyfail` main `<TBD-after-v2.0.0-commit>` — copyfail-defense umbrella v2.0.0
-- `rfxn/copyfail` gh-pages `<TBD>` — index.html refreshed for v2.0.0
-- `rfxn/copyfail` v2.0.0 tag — signed release, deep-dive link in notes
+- `rfxn/copyfail` main `<TBD-after-v2.0.1-commit>` — copyfail-defense v2.0.1 hotfix
+- `rfxn/copyfail` gh-pages `<TBD>` — index.html refresh pending Phase 8
+- `rfxn/copyfail` v2.0.0 tag — signed release (previous)
+- `rfxn/copyfail` v2.0.1 tag — pending Phase 9 (manual)
 - `rfxn/rfxn-infra` main `b86d9b7` — `docs/runbooks/copyfail-signing-key-backup.md` (unchanged)
 - forge ZFS — `hdd-pool/backups/copyfail-signing-key/` populated, snapshot `@20260430` (unchanged)
