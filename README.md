@@ -144,6 +144,11 @@ operator's hand-edits to systemd drop-ins survive package upgrade.
 Which rung blocks which bug class. **✅** = primary mitigation; **·** =
 not applicable; superscripts mark caveated coverage (notes below).
 
+Rows below are mitigation rungs the package installs. Operator-applied
+hardening (suid lockdown, auditd rules) is in its own table below
+because no subpackage performs those actions; the auditor only
+recommends them conditionally.
+
 | Mitigation rung                                  | cf1 | cf2 | DF-ESP | DF-RxRPC |
 |---                                               |:---:|:---:|:---:   |:---:     |
 | LD_PRELOAD shim (`AF_ALG` hook)                  | ✅  |  ·  |   ·    |    ¹     |
@@ -153,7 +158,6 @@ not applicable; superscripts mark caveated coverage (notes below).
 | systemd `RestrictAddressFamilies=~AF_ALG`        | ✅  |  ·  |   ·    |    ·     |
 | systemd `RestrictAddressFamilies=~AF_RXRPC`      |  ·  |  ·  |   ·    |   ✅     |
 | systemd `RestrictNamespaces=~user ~net`          |  ·  | ✅  |  ✅    |    ·     |
-| Suid lockdown (`chmod 4750 /usr/bin/su`)         |  ·  | ✅  |  ✅    |    ·     |
 
 ¹ Catches the `cksum` step in the public DF-RxRPC PoC, not the kernel
 sink itself. Useful as defense-in-depth, not as a primary stop.
@@ -172,6 +176,19 @@ or non-RHEL kernels where `algif_aead` ships modular.
 
 The auditor emits a page-cache integrity probe (cached IOC) for every
 class; see `--json` `posture.bug_classes[*].kernel_sink`.
+
+### Operator-applied (auditor-recommended)
+
+These are surfaced via `--emit-remediation`. **No subpackage applies
+them**, since each can break legitimate workloads on a busy fleet.
+Review every line before pasting.
+
+| Action                                                     | Targets       | When the auditor recommends it |
+|---                                                         |---            |--- |
+| `chmod 4750 /usr/bin/su && chgrp wheel /usr/bin/su`        | cf2, DF-ESP   | Suppressed when `/etc/passwd` shows non-wheel/admin interactive users (cPanel-style tenant fleets); chmod 4750 would break their `su` workflow. |
+| `auditd` rule `cf_userns` (`unshare(CLONE_NEWUSER)`)       | cf2, DF-ESP   | Hosts where `auditd` is tuned for userns events (otherwise high alert noise). |
+| `auditd` rule `cf_addkey` (`add_key("rxrpc",...)`)         | DF-RxRPC      | Always; rxrpc keyring activity is rare enough that the false-positive rate stays low. |
+| `auditd` rule `afalg_attempt` (`socket(a0=38)`)            | cf1           | Hosts already running `auditd`; pairs with the LD_PRELOAD shim as a tripwire. |
 
 > 🔬 **Full writeup:** [Copy Fail (CVE-2026-31431) on rfxn.com/research](https://www.rfxn.com/research/copyfail-cve-2026-31431)
 > covers cf1 kernel mechanics; cf2 and Dirty Frag extend the same
