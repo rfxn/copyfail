@@ -880,8 +880,9 @@ exit 0
 # auditd rules drop directly to /etc/audit/rules.d/. Marked
 # %config(noreplace) so an operator hand-edit survives upgrade
 # (the rule set is small and well-defined; if you have a tuned
-# set, you want yours preserved).
-%dir /etc/audit/rules.d
+# set, you want yours preserved). /etc/audit/rules.d/ itself is
+# owned by the audit package (hard Require); we do NOT %dir-claim
+# it to avoid co-ownership warnings.
 %config(noreplace) %attr(0640, root, root) /etc/audit/rules.d/99-copyfail-defense.rules
 
 # ===========================================================================

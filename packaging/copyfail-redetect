@@ -21,10 +21,11 @@ if [ ! -x /usr/libexec/copyfail-defense/detect.sh ]; then
     exit 1
 fi
 
-# Pass scope=both per D-56: operator-driven re-detect updates both
-# modprobe and systemd state regardless of which subpackage's
-# %posttrans last fired.
-/usr/libexec/copyfail-defense/detect.sh apply both
+# Pass scope=all per v2.0.2: operator-driven re-detect updates modprobe,
+# systemd AND sysctl state regardless of which subpackage's %posttrans
+# last fired. 'all' replaces 'both' (which was modprobe+systemd only)
+# now that -sysctl ships a host-wide drop-in that detection manages.
+/usr/libexec/copyfail-defense/detect.sh apply all
 echo
 echo "Detection refreshed. State: /var/lib/copyfail-defense/auto-detect.json"
 echo
@@ -32,3 +33,7 @@ echo "If conditional systemd drop-ins changed, run:"
 echo "    systemctl daemon-reload"
 echo "    systemctl try-reload-or-restart sshd.service"
 echo "to apply the change to running services."
+echo
+echo "If the sysctl drop-in was added or removed, run:"
+echo "    sysctl --system"
+echo "to apply the change to the running kernel."

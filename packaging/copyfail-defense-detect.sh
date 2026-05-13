@@ -408,6 +408,17 @@ write_state_json() {
     install -d -m 0755 -o root -g root "$(dirname "${target}")"
     local tmp="${target}.tmp.$$"
 
+    # v2.0.2 sentinel fix: applied.sysctl_userns must reflect on-disk
+    # truth, not just !suppressed. When -sysctl is uninstalled but
+    # -modprobe / -systemd are still around, detect.sh runs from their
+    # %posttrans but apply_sysctl() early-returns (template missing).
+    # JSON should show applied=false in that case, even though
+    # suppressed=false.
+    local sysctl_template_present="false"
+    if [ -f "${TEMPLATE_DIR}/sysctl/99-copyfail-defense-userns.conf" ]; then
+        sysctl_template_present="true"
+    fi
+
     # Marshall signal arrays as NUL-delimited bytes via stdin.
     # Bash command substitution silently strips NUL bytes from a captured
     # string, so an env-var carrier collapses signal1\0signal2\0 into
@@ -437,6 +448,7 @@ write_state_json() {
         CFD_SUP_SYSTEMD_RXRPC_AF="${SUPPRESS_SYSTEMD_RXRPC_AF}" \
         CFD_SUP_SYSTEMD_USERNS_USER_AT="${SUPPRESS_SYSTEMD_USERNS_USER_AT}" \
         CFD_SUP_SYSCTL_USERNS="${SUPPRESS_SYSCTL_USERNS}" \
+        CFD_SYSCTL_TEMPLATE_PRESENT="${sysctl_template_present}" \
         python3 -c '
 import json, os, sys
 
@@ -461,11 +473,12 @@ afs_signals        = take_until("CFD_END_AFS")
 rootless_signals   = take_until("CFD_END_ROOTLESS")
 consumers_signals  = take_until("CFD_END_USERNS_CONSUMERS")
 
-sup_xfrm     = b("CFD_SUP_MODPROBE_CF2_XFRM")
-sup_rxrpc    = b("CFD_SUP_MODPROBE_RXRPC")
-sup_rxaf     = b("CFD_SUP_SYSTEMD_RXRPC_AF")
-sup_userns   = b("CFD_SUP_SYSTEMD_USERNS_USER_AT")
-sup_sysctl   = b("CFD_SUP_SYSCTL_USERNS")
+sup_xfrm       = b("CFD_SUP_MODPROBE_CF2_XFRM")
+sup_rxrpc      = b("CFD_SUP_MODPROBE_RXRPC")
+sup_rxaf       = b("CFD_SUP_SYSTEMD_RXRPC_AF")
+sup_userns     = b("CFD_SUP_SYSTEMD_USERNS_USER_AT")
+sup_sysctl     = b("CFD_SUP_SYSCTL_USERNS")
+sysctl_present = b("CFD_SYSCTL_TEMPLATE_PRESENT")
 
 doc = {
     "schema_version": "2",
@@ -502,7 +515,11 @@ doc = {
         "systemd_userns_cron":       True,
         "systemd_userns_crond":      True,
         "systemd_userns_atd":        True,
-        "sysctl_userns":             not sup_sysctl,
+        # applied.sysctl_userns: true only when NOT suppressed AND
+        # the -sysctl subpackage template exists on disk (proxy for
+        # subpackage installed). Otherwise the JSON would misreport
+        # apply state on hosts where -sysctl is excluded from install.
+        "sysctl_userns":             (not sup_sysctl) and sysctl_present,
     },
 }
 with open(sys.argv[1], "w") as f:

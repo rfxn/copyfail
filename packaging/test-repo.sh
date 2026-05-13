@@ -6,12 +6,14 @@
 #   dnf repository on EL8 / EL9 / EL10. Uses podman; everything happens
 #   inside disposable containers - no host-side state is touched.
 #
-# What this exercises (v2.0.1 fixup pass - 27 checks per EL):
+# What this exercises (v2.0.2 ships 6 subpackages, -audit as soft dep):
 #   1. The .repo file is reachable on gh-pages
 #   2. dnf can fetch repodata, validate the detached repomd.xml.asc
 #      against the published gpgkey, and resolve the meta package
 #   3. RPM signatures verify (gpgcheck=1, repo_gpgcheck=1)
-#   4. All four subpackages (shim, modprobe, systemd, auditor) land
+#   4. All six subpackages land (shim, modprobe, systemd, auditor,
+#      sysctl, audit; -audit pulled via Recommends, so the soft-dep
+#      path is exercised by default dnf install)
 #   5. The shim is loadable under LD_PRELOAD without breaking dyn-linked
 #      binaries (smoke-test on /bin/true)
 #   6. AF_ALG socket creation returns EPERM with the shim in place
@@ -46,6 +48,17 @@
 #      catches RPM scriptlet syntax errors / aborts that 2.0.1-1's
 #      `dnf ... | tail -N` pipeline silently dropped (dnf returns 0
 #      when scriptlets fail; the warning is in the captured output).
+#  v2.0.2 additions:
+#  29. clean_host: /etc/sysctl.d/99-copyfail-defense-userns.conf
+#      lands by default (no userns-consumer signal in mock chroot)
+#  30. clean_host: /etc/audit/rules.d/99-copyfail-defense.rules
+#      lands (-audit pulled via meta Recommends)
+#  31. clean_host: AF_KEY restriction in 10-* systemd drop-in
+#      (~AF_KEY token literally present alongside ~AF_ALG)
+#  32. flatpak_host: pre-stage /var/lib/flatpak/app/<x>/ dir, assert
+#      sysctl drop-in suppressed; per-unit RestrictNamespaces stays
+#  33. dnf remove cascades through sysctl + audit; rules + sysctl files
+#      both gone post-erase
 #
 # Usage:
 #   bash test-repo.sh                 # all three ELs
@@ -124,8 +137,13 @@ dnf install -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -10
 assert_no_scriptlet_fail /tmp/dnf.log
 rpm -q copyfail-defense copyfail-defense-shim copyfail-defense-modprobe \
        copyfail-defense-systemd copyfail-defense-auditor \
-    || fail "subpackages not all installed"
-ok "dnf install -y copyfail-defense (gpgcheck + repo_gpgcheck, 5 subpackages)"
+       copyfail-defense-sysctl \
+    || fail "hard-Required subpackages not all installed"
+# -audit pulled via meta Recommends (soft dep). Default dnf install
+# behavior on EL8/9/10 honors Recommends, so this should resolve.
+rpm -q copyfail-defense-audit \
+    || fail "copyfail-defense-audit not pulled by meta Recommends (weak deps disabled?)"
+ok "dnf install -y copyfail-defense (gpgcheck + repo_gpgcheck, 7 subpackages incl. -sysctl + -audit)"
 
 # 3. Files are where we expect
 test -f /usr/lib64/no-afalg.so          || fail "shim .so missing"
@@ -148,7 +166,30 @@ for u in containerd docker podman; do
         fail "container-runtime drop-in for ${u} is active by default - should be opt-in only"
     fi
 done
-ok "all expected files installed (subs + active dropins + opt-in examples)"
+
+# v2.0.2: sysctl drop-in lands by default on a mock chroot (no
+# rootless containers, no Flatpak, no firejail, no desktop browsers).
+test -f /etc/sysctl.d/99-copyfail-defense-userns.conf \
+    || fail "sysctl userns drop-in missing on clean host"
+grep -q '^-user.max_user_namespaces' /etc/sysctl.d/99-copyfail-defense-userns.conf \
+    || fail "sysctl drop-in lacks user.max_user_namespaces key"
+
+# v2.0.2: audit rules file landed via -audit (pulled by meta Recommends).
+test -f /etc/audit/rules.d/99-copyfail-defense.rules \
+    || fail "audit rules file missing on clean host"
+grep -qE 'a0=38 .* -k copyfail_afalg' /etc/audit/rules.d/99-copyfail-defense.rules \
+    || fail "audit rules missing AF_ALG (a0=38) tag"
+grep -qE 'a0=15 .* -k copyfail_afkey' /etc/audit/rules.d/99-copyfail-defense.rules \
+    || fail "audit rules missing AF_KEY (a0=15) tag"
+grep -qE 'a0=33 .* -k copyfail_afrxrpc' /etc/audit/rules.d/99-copyfail-defense.rules \
+    || fail "audit rules missing AF_RXRPC (a0=33) tag"
+
+# v2.0.2: AF_KEY token in always-on systemd 10-* drop-in (alongside AF_ALG).
+grep -qE 'RestrictAddressFamilies=.*~AF_KEY' \
+    /etc/systemd/system/sshd.service.d/10-copyfail-defense.conf \
+    || fail "systemd 10-* drop-in missing ~AF_KEY restriction"
+
+ok "all expected files installed (subs + active dropins + opt-in examples + v2.0.2 sysctl/audit/AF_KEY)"
 
 # 3b. Modprobe drop file content - 9 module entries summed across the
 # split files. Use cat-then-grep so the count is a single integer;
@@ -247,7 +288,9 @@ ok "copyfail-shim-disable removed the line atomically"
 echo "/usr/lib64/no-afalg.so" > /etc/ld.so.preload   # simulate forgotten enable
 dnf remove -y copyfail-defense copyfail-defense-shim \
               copyfail-defense-modprobe copyfail-defense-systemd \
-              copyfail-defense-auditor >/tmp/dnf.log 2>&1
+              copyfail-defense-auditor \
+              copyfail-defense-sysctl copyfail-defense-audit \
+              >/tmp/dnf.log 2>&1
 assert_no_scriptlet_fail /tmp/dnf.log
 if [ -f /etc/ld.so.preload ]; then
     grep -Fxq /usr/lib64/no-afalg.so /etc/ld.so.preload \
@@ -261,7 +304,13 @@ done
 # systemd drop files removed (RPM owns them via %config)
 [ ! -f /etc/systemd/system/sshd.service.d/10-copyfail-defense.conf ] \
     || fail "sshd systemd drop-in remained after dnf remove"
-ok "dnf remove + %preun scrubbed all state safely"
+# v2.0.2: sysctl drop-in removed on full erase
+[ ! -f /etc/sysctl.d/99-copyfail-defense-userns.conf ] \
+    || fail "sysctl userns drop-in remained after dnf remove"
+# v2.0.2: audit rules removed on full erase
+[ ! -f /etc/audit/rules.d/99-copyfail-defense.rules ] \
+    || fail "audit rules file remained after dnf remove"
+ok "dnf remove + %preun scrubbed all state safely (incl. v2.0.2 sysctl + audit)"
 
 echo "=== ALL CHECKS PASSED ==="
 INNER
@@ -403,16 +452,25 @@ for u in user@ sshd cron crond atd; do
     test -f "/etc/systemd/system/${u}.service.d/15-copyfail-defense-userns.conf" \
         || fail "15-* drop missing for ${u} on clean host"
 done
+# v2.0.2: sysctl drop-in landed (no userns-consumer signal in mock)
+test -f /etc/sysctl.d/99-copyfail-defense-userns.conf \
+    || fail "sysctl userns drop-in missing on clean host"
+# v2.0.2: audit rules landed (-audit pulled by meta Recommends)
+test -f /etc/audit/rules.d/99-copyfail-defense.rules \
+    || fail "audit rules missing on clean host"
 # auto-detect.json present and reports nothing
 test -f /var/lib/copyfail-defense/auto-detect.json \
     || fail "auto-detect.json missing"
 jq -e '.schema_version == "2" and
        .detected.ipsec.present == false and
        .detected.afs.present == false and
-       .detected.rootless_containers.present == false' \
+       .detected.rootless_containers.present == false and
+       .detected.userns_consumers.present == false and
+       .applied.sysctl_userns == true and
+       .suppressed.sysctl_userns == false' \
        /var/lib/copyfail-defense/auto-detect.json >/dev/null \
-    || fail "auto-detect.json reports workloads on clean host (or wrong schema)"
-ok "clean host: all 18 drop files present + JSON reports clean"
+    || fail "auto-detect.json reports workloads on clean host (or wrong v2.0.2 schema)"
+ok "clean host: all drop files present (18 dropins + sysctl + audit rules) + JSON reports clean"
 echo "=== CLEAN HOST OK ==="
 INNER
 }
@@ -957,6 +1015,79 @@ echo "=== SPLIT-UPGRADE OK ==="
 INNER
 }
 
+# v2.0.2 userns-consumer suppression test: pre-stage a Flatpak signal
+# and assert the host-wide sysctl drop-in is suppressed while the
+# per-tenant-unit RestrictNamespaces stays active. Mirrors the
+# rootless_host scenario but exercises the new userns_consumers signal
+# path (Flatpak / firejail / desktop browsers vs rootless containers).
+run_userns_consumer_test_in() {
+    local image="$1"
+    podman run --rm -i --network=host \
+        -e REPO_URL="$REPO_URL" -e KEY_URL="$KEY_URL" \
+        "$image" /bin/bash <<'INNER'
+set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok:   $*"; }
+assert_no_scriptlet_fail() {
+    local _log="$1"
+    if grep -qE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log"; then
+        echo "--- RPM scriptlet failure markers in dnf output ---" >&2
+        grep -nE 'scriptlet failed|Error in (POST|PRE)|syntax error near' "$_log" >&2
+        echo "--- end ---" >&2
+        fail "RPM scriptlet failure detected during dnf operation"
+    fi
+}
+
+# Pre-stage Flatpak signal: detect.sh looks at /var/lib/flatpak/app
+# for any non-empty subdirectory and at /var/lib/flatpak/runtime
+# similarly. A single fake app entry is enough to trip the signal
+# without installing the actual Flatpak runtime.
+mkdir -p /var/lib/flatpak/app/org.example.Test/current/active \
+         /var/lib/flatpak/runtime
+
+curl -sSfL "$REPO_URL" -o /etc/yum.repos.d/copyfail.repo
+dnf install -y python3 jq >/dev/null 2>&1 || true
+dnf install -y copyfail-defense 2>&1 | tee /tmp/dnf.log | tail -5
+assert_no_scriptlet_fail /tmp/dnf.log
+
+# Detection must report userns_consumers=present.
+jq -e '.detected.userns_consumers.present == true' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "Flatpak signal not detected (userns_consumers.present != true)"
+
+# Suppression flag MUST be set.
+jq -e '.suppressed.sysctl_userns == true' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "sysctl_userns suppression not set despite Flatpak signal"
+
+# Applied flag MUST be false (paired with template_present gating).
+jq -e '.applied.sysctl_userns == false' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "applied.sysctl_userns true despite Flatpak suppression"
+
+# Host-wide sysctl drop-in MUST NOT exist on disk.
+[ ! -f /etc/sysctl.d/99-copyfail-defense-userns.conf ] \
+    || fail "sysctl drop-in landed despite Flatpak detection"
+
+# Per-unit RestrictNamespaces drop-in MUST still apply on all five
+# tenant units - the Flatpak suppression only touches the host-wide
+# sysctl, not the per-unit cuts.
+for u in user@ sshd cron crond atd; do
+    test -f "/etc/systemd/system/${u}.service.d/15-copyfail-defense-userns.conf" \
+        || fail "15-userns drop suppressed for ${u} despite Flatpak-only signal"
+done
+
+# rootless_containers should NOT be flagged (we only staged Flatpak,
+# not /home/*/.local/share/containers/storage).
+jq -e '.detected.rootless_containers.present == false' \
+       /var/lib/copyfail-defense/auto-detect.json >/dev/null \
+    || fail "rootless_containers tripped by Flatpak-only signal (FP regression)"
+
+ok "userns_consumer (Flatpak): sysctl drop-in suppressed; per-unit cuts retained"
+echo "=== USERNS-CONSUMER OK ==="
+INNER
+}
+
 # Sanity: verify the live URLs are reachable BEFORE we burn container time.
 echo "Probing $REPO_URL ..."
 http_code=$(curl -sSI -o /dev/null -w '%{http_code}' "$REPO_URL")
@@ -1021,10 +1152,12 @@ for el in "${ELS[@]}"; do
 
     # v2.0.1: detection scenario tests (rev 2: + subuid_no_storage;
     # fixup pass: + systemd_only for M-2 canary).
+    # v2.0.2: + userns_consumer for Flatpak/firejail/browser signal.
     for scenario_name in clean_host ipsec_host afs_host rootless_host \
                          subuid_no_storage \
                          force_full redetect split_upgrade \
-                         systemd_only; do
+                         systemd_only \
+                         userns_consumer; do
         echo
         step "${scenario_name} test"
         scenario_rc=0

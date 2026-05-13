@@ -179,15 +179,9 @@ were folded into the v2.0.1 ship — see SPEC §12 D-51..D-58):
 
 ## Open for v2.1.0 (after v2.0.0 lands)
 
-- [x] **DONE in v2.0.2 (2026-05-13)** — Shipped
-  `copyfail-defense-sysctl` subpackage with
-  `user.max_user_namespaces=0` /
-  `kernel.unprivileged_userns_clone=0` /
-  `kernel.apparmor_restrict_unprivileged_userns=1`. **Deviation:**
-  meta hard-Requires it rather than opt-in-only; auto-detection
-  suppresses the drop file on rootless containers / Flatpak /
-  firejail / desktop browsers, so "blast radius documented loudly"
-  becomes "blast radius auto-detected and avoided".
+(The original v2.1.0 userns-subpackage item moved to "Shipped in
+v2.0.2" above — landed early as `copyfail-defense-sysctl`.)
+
 - [ ] Drop the `Obsoletes:`/`Provides:` for `afalg-defense*`
   names from the spec. The compat chain is retained through the
   2.0.x line per **[D-21]**.
