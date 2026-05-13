@@ -59,6 +59,7 @@ report a problem: <a href="https://github.com/rfxn/copyfail/issues/new/choose">f
 
 <nav class="page-nav">
   <a href="#install">Install</a> &middot;
+  <a href="#changelog">Changelog</a> &middot;
   <a href="#coverage">Coverage</a> &middot;
   <a href="#auto-detect">Auto-detection</a> &middot;
   <a href="#verify">Verify</a> &middot;
@@ -90,55 +91,35 @@ MSG_SPLICE_PAGES</code> page-cache write primitive.
     <td><code>rxkad_verify_packet_1</code> in-place <code>pcbc(fcrypt)</code></td>
     <td>none</td></tr>
 <tr><td><strong>Fragnesia</strong></td>
-    <td>(no CVE yet &mdash; same surface as CVE-2026-43284)</td>
+    <td>(no CVE yet; same surface as CVE-2026-43284)</td>
     <td><code>espintcp</code> ULP after splice into TCP receive queue</td>
     <td>same as cf2</td></tr>
 </table>
 
 <p class="lede">
-v2.0.2 stacks six defensive primitives into a single <code>dnf
-install</code>: an <strong>LD_PRELOAD shim</strong> (cf1 primary), a
-<strong>modprobe blacklist</strong> for the cf-class entry-point modules
-(cf1 + cf2 + Dirty Frag), <strong>kernel-enforced systemd drop-ins</strong>
-(<code>RestrictAddressFamilies=~AF_ALG ~AF_KEY ~AF_RXRPC</code> +
-<code>RestrictNamespaces=~user ~net</code>), a <strong>host-wide userns
-sysctl</strong> (<code>user.max_user_namespaces=0</code>, suppressed on
-userns-consumer hosts), <strong>auditd tripwire rules</strong> for
-<code>socket(AF_ALG/AF_KEY/AF_RXRPC)</code> from unprivileged users,
-and a <strong>read-only host posture auditor</strong> that reports
-per-class coverage in JSON for SIEM ingest.
+Six defense-in-depth rungs in one <code>dnf install</code> for EL8/EL9/EL10:
+LD_PRELOAD shim, modprobe blacklist, per-unit systemd drop-ins,
+host-wide userns sysctl, auditd tripwires, and a read-only posture
+auditor. Auto-detection at install time suppresses any drop-in that
+would conflict with detected workloads (IPsec, AFS, rootless
+containers, Flatpak, firejail, desktop browsers); every other layer
+stays active.
 </p>
 <p class="lede">
-<strong>v2.0.2 adds Fragnesia / Dirty Frag-ESP coverage</strong>
-(<code>AF_KEY</code> SA-config path blocked, host-wide userns sysctl,
-audit tripwires). <strong>v2.0.1 introduced workload auto-detection</strong>
-&mdash; <code>%posttrans</code> inspects the host for IPsec, AFS,
-rootless containers, and (v2.0.2) Flatpak / firejail / desktop browsers,
-and suppresses only the conflicting drop-ins. Every other layer stays
-active. <code>copyfail-redetect</code> re-runs after fleet changes;
-<code>/etc/copyfail/force-full</code> bypasses detection.
-See <a href="#auto-detect">&sect;Auto-detection</a> below for the full
-signal list, suppression matrix, and how to inspect the decision.
-</p>
-<p class="lede">
-&#x1F50D; <strong>Full writeup:</strong>
-<a href="https://www.rfxn.com/research/copyfail-cve-2026-31431"><strong>Copy
-Fail (CVE-2026-31431) on rfxn.com/research</strong></a> covers the cf1
-kernel mechanics; cf2 and Dirty Frag extend the same
-<code>splice()</code> &rarr; in-place-crypto primitive to two more
-sinks.
+See <a href="#changelog">&sect;Changelog</a> for per-version detail,
+<a href="#auto-detect">&sect;Auto-detection</a> for the signal list /
+suppression matrix, and
+<a href="https://www.rfxn.com/research/copyfail-cve-2026-31431">rfxn.com/research</a>
+for the cf1 kernel mechanics deep-dive.
 </p>
 
 <div class="note">
-<strong>Upgrading from <code>afalg-defense</code> v1.0.x or
-<code>copyfail-defense</code> v2.0.0?</strong>
-<code>dnf upgrade copyfail-defense</code> performs the rename swap +
-file-layout split automatically. v2.0.0 monolithic conf files are
-preserved as <code>.rpmsave-v2.0.1</code> next to the new split files
-so any operator hand-edits survive. Auto-detection runs once at
-upgrade; review <code>journalctl -t copyfail-defense</code> after the
-transaction to see what was suppressed. Shim activation
-remains the explicit operator step (<code>copyfail-shim-enable</code>).
+<strong>Upgrading from any 2.0.x or <code>afalg-defense</code> v1.0.x?</strong>
+<code>dnf upgrade copyfail-defense</code> handles every prior layout
+change (rename, file split, new subpackages) automatically. Auto-detect
+re-runs on each upgrade; review <code>journalctl -t copyfail-defense</code>
+afterward to see what was suppressed. Shim activation remains the
+explicit operator step (<code>copyfail-shim-enable</code>).
 </div>
 
 <h2 id="install">Install</h2>
@@ -175,6 +156,88 @@ minimal hosts without auditd skip the auditd pull-in):</p>
     <td>auditd tripwire rules for <code>socket(AF_ALG/AF_KEY/AF_RXRPC)</code>
     from <code>auid&ge;1000</code> (cf-class userspace prep)</td></tr>
 </table>
+
+<h2 id="changelog">Changelog</h2>
+<p>
+Per-version summary. Full per-commit history:
+<a href="https://github.com/rfxn/copyfail/commits/main">github.com/rfxn/copyfail/commits</a>.
+Per-release notes: <a href="https://github.com/rfxn/copyfail/releases">github.com/rfxn/copyfail/releases</a>.
+</p>
+
+<h3>v2.0.2 (2026-05-13) &middot; Fragnesia / Dirty Frag-ESP coverage</h3>
+<ul>
+<li>New <code>copyfail-defense-sysctl</code>: host-wide
+    <code>user.max_user_namespaces=0</code> sysctl drop-in. Auto-suppressed
+    on rootless containers, Flatpak, firejail, desktop browsers.</li>
+<li>New <code>copyfail-defense-audit</code> (soft-dep): auditd rules
+    tripping on <code>socket(AF_ALG/AF_KEY/AF_RXRPC)</code> at
+    <code>auid&ge;1000</code>. Query:
+    <code>ausearch -k copyfail_afalg|copyfail_afkey|copyfail_afrxrpc</code>.</li>
+<li>systemd 10-* drop-in adds <code>~AF_KEY</code> to
+    <code>RestrictAddressFamilies</code>. Closes the PF_KEYv2 SA-config
+    path used by Dirty Frag / Fragnesia.</li>
+<li>CVE cross-stamping: cf2 = <strong>CVE-2026-43284</strong>,
+    DF-RxRPC = <strong>CVE-2026-43500</strong>. Fragnesia documented as
+    same surface as CVE-2026-43284 (no upstream CVE assigned yet).</li>
+</ul>
+
+<h3>v2.0.1-2 (2026-05-08) &middot; packaging hotfix</h3>
+<ul>
+<li><code>-p /bin/bash</code> on four proc-sub scriptlets
+    (%posttrans / %postun for -modprobe and -systemd). Without it, EL8's
+    <code>/bin/sh</code> rejects the bash proc-sub idiom as a syntax error
+    and detect.sh silently never runs.</li>
+<li><code>%pretrans</code> v2.0.0&rarr;v2.0.1 rename guard fixed: was
+    using unescaped <code>%{version}</code> (expanded at build time);
+    now uses <code>%%{version}</code> so the macro reaches the scriptlet
+    body and queries the actually-installed version.</li>
+<li><code>test-repo.sh</code> adds a scriptlet-failure regression guard
+    that catches the class of bug 2.0.1-1 shipped with
+    (<code>scriptlet failed</code> / <code>syntax error near</code> markers
+    in dnf output).</li>
+</ul>
+
+<h3>v2.0.1 (2026-05-08) &middot; workload auto-detection</h3>
+<ul>
+<li><code>%posttrans</code> detection of IPsec / AFS / rootless-container
+    workloads. Conflicting drop-ins are suppressed automatically; every
+    other layer stays active. State written to
+    <code>/var/lib/copyfail-defense/auto-detect.json</code>.</li>
+<li>File-layout split: monolithic modprobe + systemd drop files become
+    three modprobe files (<code>-cf1</code>, <code>-cf2-xfrm</code>,
+    <code>-rxrpc</code>) and three systemd drop-in layers (10-* always-on,
+    12-* AF_RXRPC, 15-* userns).</li>
+<li>New <code>copyfail-redetect</code> helper re-runs detection on demand.
+    <code>/etc/copyfail/force-full</code> sentinel bypasses detection.</li>
+</ul>
+
+<h3>v2.0.0 (2026-05-08) &middot; copyfail-defense umbrella</h3>
+<ul>
+<li>Package family renamed <code>afalg-defense</code> &rarr;
+    <code>copyfail-defense</code>. Scope expanded to the Copy Fail bug
+    class (cf1 + cf2 + Dirty Frag).</li>
+<li>New <code>-modprobe</code> subpackage: kernel-module entry-point cuts.</li>
+<li>New <code>-systemd</code> subpackage: per-unit
+    <code>RestrictAddressFamilies</code> and
+    <code>RestrictNamespaces</code> drop-ins on user@/sshd/cron/crond/atd.</li>
+<li><code>Obsoletes:</code>/<code>Provides:</code> on
+    <code>afalg-defense*</code> for clean upgrade. Compat retained
+    through the 2.0.x line.</li>
+</ul>
+
+<h3>v1.0.1 (2026-04-29) &middot; initial signed release</h3>
+<ul>
+<li>RPMs and repodata GPG-signed by the Copyfail Project Signing Key
+    (fingerprint <code>6001 1CDC EA2F F52D 975A FDEE 6D30 F32C D5E8 0F80</code>).
+    Published <code>.repo</code> enforces <code>gpgcheck=1</code> +
+    <code>repo_gpgcheck=1</code>.</li>
+<li>Subpackages: <code>afalg-defense-shim</code> (LD_PRELOAD
+    <code>AF_ALG</code> block) and <code>afalg-defense-auditor</code>
+    (read-only host posture auditor).</li>
+<li>Shim installed but not auto-enabled; operator runs
+    <code>copyfail-shim-enable</code> after pre-flight LD_PRELOAD
+    smoke-test against <code>/bin/true</code>.</li>
+</ul>
 
 <h2 id="coverage">Coverage matrix</h2>
 <p>
@@ -342,7 +405,7 @@ coverage is unchanged on every host.
 <p class="footnotes">
 False-positive guards baked into the detector:
 <code>/etc/subuid</code> populated by <code>useradd</code> is
-<strong>not</strong> a rootless signal &mdash; shadow-utils auto-populates
+<strong>not</strong> a rootless signal: shadow-utils auto-populates
 subuid for every regular user regardless of container intent, which
 produced near-100% FPs on cPanel-shaped fleets in v2.0.1 rev 1.
 The rootful <code>/var/lib/containers/storage</code> signal is gated
