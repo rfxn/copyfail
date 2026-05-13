@@ -106,8 +106,8 @@ containers, Flatpak, firejail, desktop browsers); every other layer
 stays active.
 </p>
 <p class="lede">
-See <a href="#changelog">&sect;Changelog</a> for per-version detail,
-<a href="#auto-detect">&sect;Auto-detection</a> for the signal list /
+See the <a href="#changelog">Changelog</a> for per-version detail,
+<a href="#auto-detect">Auto-detection</a> for the signal list and
 suppression matrix, and
 <a href="https://www.rfxn.com/research/copyfail-cve-2026-31431">rfxn.com/research</a>
 for the cf1 kernel mechanics deep-dive.
@@ -246,51 +246,90 @@ Which rung blocks which bug class. <strong class="ok">&#x2713;</strong>
 applicable; superscripts mark caveated coverage (notes below).
 </p>
 <table>
-<tr><th>Mitigation rung</th><th>cf1</th><th>cf2</th><th>DF-ESP</th><th>DF-RxRPC</th></tr>
+<tr><th>Mitigation rung</th><th>cf1</th><th>cf2</th><th>DF-ESP</th><th>DF-RxRPC</th><th>Fragnesia</th></tr>
 <tr><td>LD_PRELOAD shim (<code>AF_ALG</code> hook)</td>
     <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td>
-    <td class="cls-n">&middot;</td><td class="cls-fn">&sup1;</td></tr>
+    <td class="cls-n">&middot;</td><td class="cls-fn">&sup1;</td>
+    <td class="cls-n">&middot;</td></tr>
 <tr><td><code>modprobe</code> <code>algif_aead</code> family</td>
     <td class="cls-fn">&sup2;</td><td class="cls-n">&middot;</td>
-    <td class="cls-n">&middot;</td><td class="cls-n">&middot;</td></tr>
+    <td class="cls-n">&middot;</td><td class="cls-n">&middot;</td>
+    <td class="cls-n">&middot;</td></tr>
 <tr><td><code>modprobe</code> <code>esp4 esp6 xfrm_user xfrm_algo</code></td>
     <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td>
-    <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td></tr>
+    <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td>
+    <td class="cls-y">&#x2713;</td></tr>
 <tr><td><code>modprobe</code> <code>rxrpc</code></td>
     <td class="cls-n">&middot;</td><td class="cls-n">&middot;</td>
-    <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td></tr>
+    <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td>
+    <td class="cls-n">&middot;</td></tr>
 <tr><td>systemd <code>RestrictAddressFamilies=~AF_ALG</code></td>
     <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td>
-    <td class="cls-n">&middot;</td><td class="cls-n">&middot;</td></tr>
+    <td class="cls-n">&middot;</td><td class="cls-n">&middot;</td>
+    <td class="cls-n">&middot;</td></tr>
+<tr><td>systemd <code>RestrictAddressFamilies=~AF_KEY</code> <em>(v2.0.2)</em></td>
+    <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td>
+    <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td>
+    <td class="cls-y">&#x2713;</td></tr>
 <tr><td>systemd <code>RestrictAddressFamilies=~AF_RXRPC</code></td>
     <td class="cls-n">&middot;</td><td class="cls-n">&middot;</td>
-    <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td></tr>
+    <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td>
+    <td class="cls-n">&middot;</td></tr>
 <tr><td>systemd <code>RestrictNamespaces=~user ~net</code></td>
     <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td>
-    <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td></tr>
+    <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td>
+    <td class="cls-y">&#x2713;</td></tr>
+<tr><td>sysctl <code>user.max_user_namespaces=0</code> <em>(v2.0.2)</em></td>
+    <td class="cls-n">&middot;</td><td class="cls-y">&#x2713;</td>
+    <td class="cls-y">&#x2713;</td><td class="cls-n">&middot;</td>
+    <td class="cls-y">&#x2713;</td></tr>
+<tr><td>auditd tripwire rules <em>(v2.0.2)</em></td>
+    <td class="cls-fn">&sup3;</td><td class="cls-fn">&sup3;</td>
+    <td class="cls-fn">&sup3;</td><td class="cls-fn">&sup3;</td>
+    <td class="cls-fn">&sup3;</td></tr>
 </table>
 <p class="footnotes">
 <sup>1</sup> Catches the <code>cksum</code> step in the public DF-RxRPC
 PoC, not the kernel sink itself; defense-in-depth, not a primary stop.<br>
 <sup>2</sup> No-op on RHEL stock kernels (<code>CRYPTO_USER_API*</code>
-is built-in, so the blacklist line cannot prevent load). Listed for
-completeness on custom or non-RHEL kernels where <code>algif_aead</code>
-ships modular.
+is built-in, so the blacklist line cannot prevent load). Supported
+workaround: <code>grubby --update-kernel ALL --args
+"initcall_blacklist=algif_aead_init"</code> followed by a reboot.
+The auditor reports this state under MITIGATION.<br>
+<sup>3</sup> Detection, not mitigation: telemetry for
+<code>socket(AF_ALG/AF_KEY/AF_RXRPC)</code> from unprivileged users.
+Real value on hosts where modprobe blacklists are auto-suppressed
+(IPsec / AFS workloads) and the kernel sink stays reachable; the rules
+become the residual tripwire. Query via <code>ausearch -k copyfail_afalg</code>
+/ <code>copyfail_afkey</code> / <code>copyfail_afrxrpc</code>.
 </p>
 
 <h3>Reference: kernel patches and audit signatures</h3>
 <table>
 <tr><th>Class</th><th>Upstream patch</th><th>Audit signature</th></tr>
-<tr><td>cf1</td><td><code>a664bf3d</code></td><td><code>socket(a0=38)</code></td></tr>
-<tr><td>cf2</td><td><code>f4c50a4034</code></td><td><code>unshare(NEWUSER)</code></td></tr>
-<tr><td>DF-ESP</td><td><code>f4c50a4034</code></td><td><code>unshare(NEWUSER)</code></td></tr>
-<tr><td>DF-RxRPC</td><td>none upstream</td><td><code>add_key("rxrpc",...)</code></td></tr>
+<tr><td>cf1</td>
+    <td><code>a664bf3d</code></td>
+    <td><code>socket(a0=38)</code> / <code>copyfail_afalg</code></td></tr>
+<tr><td>cf2</td>
+    <td><code>f4c50a4034</code></td>
+    <td><code>socket(a0=15)</code> / <code>copyfail_afkey</code> &middot; <code>unshare(NEWUSER)</code></td></tr>
+<tr><td>DF-ESP</td>
+    <td><code>f4c50a4034</code></td>
+    <td>same as cf2</td></tr>
+<tr><td>DF-RxRPC</td>
+    <td>none upstream</td>
+    <td><code>socket(a0=33)</code> / <code>copyfail_afrxrpc</code> &middot; <code>add_key("rxrpc",...)</code></td></tr>
+<tr><td>Fragnesia</td>
+    <td>netdev only (2026-05-13); not yet in stable trees</td>
+    <td>same as cf2 plus <code>setsockopt(TCP_ULP="espintcp")</code></td></tr>
 </table>
 <p>
-The auditor probes page-cache integrity for <code>/usr/bin/su</code>
-and the PAM stacks every class targets, as a cached-IOC for an
-in-flight exploit. See <code>--json</code>
-<code>posture.bug_classes[*].kernel_sink</code>.
+The <code>copyfail_*</code> keys are installed by the v2.0.2
+<code>-audit</code> subpackage at
+<code>/etc/audit/rules.d/99-copyfail-defense.rules</code>. The auditor
+probes page-cache integrity for <code>/usr/bin/su</code> and the PAM
+stacks every class targets, as a cached-IOC for an in-flight exploit.
+See <code>--json</code> <code>posture.bug_classes[*].kernel_sink</code>.
 </p>
 
 <h3>Operator-applied (auditor-recommended)</h3>
@@ -769,20 +808,26 @@ defeats one does not necessarily defeat the next.
 <table>
 <tr><th>Rung</th><th>Where it fails</th><th>What the next rung covers</th></tr>
 <tr><td>Kernel patch (vendor)</td>
-    <td>EL7 EOL; rollout lags disclosure days-to-weeks; reboot may not be available; <strong>Dirty Frag-RxRPC has no upstream patch</strong></td>
+    <td>EL7 EOL; rollout lags disclosure days-to-weeks; reboot may not be available; <strong>Dirty Frag-RxRPC has no upstream patch</strong>; <strong>Fragnesia is on netdev only as of 2026-05-13</strong>, not yet in stable trees</td>
     <td>Userspace cuts close the window without a reboot</td></tr>
 <tr><td><code>modprobe</code> blacklist</td>
     <td>No-op when relevant module is <strong>builtin</strong> (RHEL <code>algif_aead</code> is); no effect on already-resident modules</td>
-    <td>Functional for <code>esp4</code>/<code>esp6</code>/<code>xfrm_user</code>/<code>xfrm_algo</code>/<code>rxrpc</code> on stock RHEL kernels</td></tr>
+    <td>Functional for <code>esp4</code>/<code>esp6</code>/<code>xfrm_user</code>/<code>xfrm_algo</code>/<code>rxrpc</code> on stock RHEL kernels. RHEL <code>algif_aead</code>: use <code>grubby --update-kernel ALL --args "initcall_blacklist=algif_aead_init"</code> + reboot.</td></tr>
 <tr><td>systemd <code>RestrictAddressFamilies</code> / <code>RestrictNamespaces</code></td>
-    <td>Reaches only services systemd starts post-restriction. Misses cron-as-root, sshd-pre-restriction, container payloads with own pid 1</td>
-    <td>LD_PRELOAD shim covers every dyn-linked process regardless of init</td></tr>
+    <td>Reaches only services systemd starts post-restriction. Misses cron-as-root, sshd-pre-restriction, container payloads with own pid 1, interactive shell users running an exploit binary</td>
+    <td>Host-wide userns sysctl (v2.0.2) catches the interactive-shell case; LD_PRELOAD shim covers every dyn-linked process regardless of init</td></tr>
+<tr><td>Host-wide userns sysctl <em>(v2.0.2)</em></td>
+    <td>Auto-suppressed on rootless containers / Flatpak / firejail / desktop browsers. Setting only affects <code>unshare(2)</code> calls made <strong>after</strong> the sysctl took effect; in-flight processes that already grabbed a userns retain it until exit</td>
+    <td>Per-unit <code>RestrictNamespaces</code> still applies on the five tenant units even when the host-wide sysctl is suppressed; auditd rules log post-suppression userns prep</td></tr>
 <tr><td><strong>LD_PRELOAD shim</strong></td>
     <td>Static binaries; direct <code>syscall</code> instruction; SUID strip</td>
     <td>seccomp at unit/runtime level catches direct-syscall path</td></tr>
 <tr><td>seccomp filter</td>
     <td>Per-service. Operationally heavy: each unit/runtime needs explicit policy</td>
     <td>This package's systemd subpackage ships a one-line filter for the highest-leverage tenant units</td></tr>
+<tr><td>auditd tripwire rules <em>(v2.0.2)</em></td>
+    <td>Detection only, not mitigation. Fails when auditd is not running, the rules are unloaded, or the attacker arrives via a path that bypasses syscall auditing (kprobe-disabled kernels)</td>
+    <td>Becomes the residual signal on hosts where modprobe blacklists are auto-suppressed (IPsec / AFS workloads) and the kernel sink stays reachable</td></tr>
 </table>
 
 <h2>Reporting issues</h2>
