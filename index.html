@@ -612,10 +612,14 @@ clean, <code>2</code> VULN, <code>3</code> VULN-but-mitigated,
 Each release on
 <a href="https://github.com/rfxn/copyfail/releases/latest">github.com/rfxn/copyfail/releases</a>
 ships per-EL binary RPMs, an SRPM, the <code>.repo</code> file, and the
-public signing key as release assets. The same files are published in
-the dnf tree below. v2.0.0 and v1.0.1 RPMs are retained alongside
-v2.0.1 to support clean <code>dnf upgrade</code> across the rename
-chain (<code>afalg-defense</code> &rarr; <code>copyfail-defense</code>).
+public signing key as release assets. Only the current version is
+listed below; prior 2.0.x releases and the legacy
+<code>afalg-defense</code> 1.0.1 line remain in the dnf repodata so
+<code>dnf upgrade</code> resolves cleanly from any installed version.
+Pin a specific older release with
+<code>dnf install copyfail-defense-2.0.1*</code> if needed, or browse
+all of them on the
+<a href="https://github.com/rfxn/copyfail/releases">GitHub releases page</a>.
 </p>
 <p>The <code>.repo</code> file (works on EL8/EL9/EL10):</p>
 <pre>sudo curl -sSL https://rfxn.github.io/copyfail/copyfail.repo \
@@ -650,32 +654,6 @@ across ELs.
     <td class="sha">5410eff2cd467b84b85fd250dcff585603af7c780d8b6d308236959a581faf3b</td></tr>
 <tr><td><a href="repo/8/x86_64/copyfail-defense-2.0.2-1.el8.src.rpm">copyfail-defense-2.0.2-1.el8.src.rpm</a></td>
     <td class="sha">d073a5ae024acca5854a7b954cf3fe9159d0bfa39f59a03bc7d28fbf6e203a71</td></tr>
-<tr><td colspan="2" style="background:#fafafa;font-size:.85em;color:#666;padding-top:.4rem">v2.0.1-2 (retained for upgrade-cycle)</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-2.0.1-2.el8.x86_64.rpm">copyfail-defense-2.0.1-2.el8.x86_64.rpm</a></td>
-    <td class="sha">a76d8a8da5e407fa398980125630d5d3a3b24521560c45e860e616797af80925</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-auditor-2.0.1-2.el8.noarch.rpm">copyfail-defense-auditor-2.0.1-2.el8.noarch.rpm</a></td>
-    <td class="sha">78a1ded53e1dfdde5ac09df3d98500fd9c6a9bf392472dcdf610e7c75bcd128e</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-modprobe-2.0.1-2.el8.noarch.rpm">copyfail-defense-modprobe-2.0.1-2.el8.noarch.rpm</a></td>
-    <td class="sha">6b8478aa4d9fd164c12e8551d3197087bb80e9a41ed94078616b018cb4613f36</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-shim-2.0.1-2.el8.x86_64.rpm">copyfail-defense-shim-2.0.1-2.el8.x86_64.rpm</a></td>
-    <td class="sha">f56deb73e99d2815ad3cc6c609a91ea29d4d3db0923dfb8f3c8da57c7aa2dfa5</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-systemd-2.0.1-2.el8.noarch.rpm">copyfail-defense-systemd-2.0.1-2.el8.noarch.rpm</a></td>
-    <td class="sha">2cb98126cef6269663a6c4cc91cd8254c84a8e070ad392fb2bb20fd5f305c69a</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-2.0.1-2.el8.src.rpm">copyfail-defense-2.0.1-2.el8.src.rpm</a></td>
-    <td class="sha">bb3518de49a5578988c7700e82a54a1a8a69498b08250d93aa4ac6fbb53d48f6</td></tr>
-<tr><td colspan="2" style="background:#fafafa;font-size:.85em;color:#666;padding-top:.4rem">v2.0.0 (retained for upgrade-cycle)</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-2.0.0-1.el8.x86_64.rpm">copyfail-defense-2.0.0-1.el8.x86_64.rpm</a></td>
-    <td class="sha">48cd6c0c0ad5d81d7c995c8116540dc27f37347733841b78812905315978c0d1</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-auditor-2.0.0-1.el8.noarch.rpm">copyfail-defense-auditor-2.0.0-1.el8.noarch.rpm</a></td>
-    <td class="sha">7aeda780a8474eeb343170a1dcc8512c9fc617066882e5e1880ecfb377937e68</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-modprobe-2.0.0-1.el8.noarch.rpm">copyfail-defense-modprobe-2.0.0-1.el8.noarch.rpm</a></td>
-    <td class="sha">1be80b66a5869fa9bfa9a4890784691c938fe9d3987293ea39f4b815a4f209c0</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-shim-2.0.0-1.el8.x86_64.rpm">copyfail-defense-shim-2.0.0-1.el8.x86_64.rpm</a></td>
-    <td class="sha">808b8bde6e7ff0401b7aebae45a85bad13cc2ead751acf4e713e829c492fa391</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-systemd-2.0.0-1.el8.noarch.rpm">copyfail-defense-systemd-2.0.0-1.el8.noarch.rpm</a></td>
-    <td class="sha">a982573aee5d2945db4b4939a8106e80393b0b2256c6e9fbaffd34329571f1ef</td></tr>
-<tr><td><a href="repo/8/x86_64/copyfail-defense-2.0.0-1.el8.src.rpm">copyfail-defense-2.0.0-1.el8.src.rpm</a></td>
-    <td class="sha">e558257a57fe027c459128e6a6cd0a66b5aeb30fd85ad04a76b3a4e98d147458</td></tr>
 </table>
 
 <h3>EL9 (RHEL/Alma/Rocky/CentOS Stream 9)</h3>
@@ -697,32 +675,6 @@ across ELs.
     <td class="sha">e6f4ff4b6f69dad619a5575c66e0dcc49a8b8638819e5e957dd7819b185d329b</td></tr>
 <tr><td><a href="repo/9/x86_64/copyfail-defense-2.0.2-1.el9.src.rpm">copyfail-defense-2.0.2-1.el9.src.rpm</a></td>
     <td class="sha">53e6a79f6545fd1797409099d1a74f90790a1a9cfea9b250c65edf97296807e8</td></tr>
-<tr><td colspan="2" style="background:#fafafa;font-size:.85em;color:#666;padding-top:.4rem">v2.0.1-2 (retained for upgrade-cycle)</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-2.0.1-2.el9.x86_64.rpm">copyfail-defense-2.0.1-2.el9.x86_64.rpm</a></td>
-    <td class="sha">e13ab958e9fce77c548da98b9907b0f2806f59c747e117c103685baa336260c5</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-auditor-2.0.1-2.el9.noarch.rpm">copyfail-defense-auditor-2.0.1-2.el9.noarch.rpm</a></td>
-    <td class="sha">8a65eaa9762c3d61b79f2191b34a43c51586343d8fad199fc9b2f9bcb6ba535e</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-modprobe-2.0.1-2.el9.noarch.rpm">copyfail-defense-modprobe-2.0.1-2.el9.noarch.rpm</a></td>
-    <td class="sha">1b5c89b5437fdedf8dc98359d72c6d0650c0777ddb0b8efc7ea46732c3148101</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-shim-2.0.1-2.el9.x86_64.rpm">copyfail-defense-shim-2.0.1-2.el9.x86_64.rpm</a></td>
-    <td class="sha">37740fa9d4908ac02cf3eb1157bc69714adcededac5c40158d1e6a3de8bbafb1</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-systemd-2.0.1-2.el9.noarch.rpm">copyfail-defense-systemd-2.0.1-2.el9.noarch.rpm</a></td>
-    <td class="sha">7b684e015829737c3d818ab9c178ee8ea9557c927d788c69446c01ed441224b7</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-2.0.1-2.el9.src.rpm">copyfail-defense-2.0.1-2.el9.src.rpm</a></td>
-    <td class="sha">a91658e0144bb76d4cd6cbf99d3a0bc72e5be2b9d5d462dff34417c61014ab0e</td></tr>
-<tr><td colspan="2" style="background:#fafafa;font-size:.85em;color:#666;padding-top:.4rem">v2.0.0 (retained for upgrade-cycle)</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-2.0.0-1.el9.x86_64.rpm">copyfail-defense-2.0.0-1.el9.x86_64.rpm</a></td>
-    <td class="sha">b096765a794f4a493a5c95791010d91fcd2dd6b2eec089d5299149c29e41c3e9</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-auditor-2.0.0-1.el9.noarch.rpm">copyfail-defense-auditor-2.0.0-1.el9.noarch.rpm</a></td>
-    <td class="sha">a202f54eacbe65aaabc1c3b5e9f086286aa23ed7ca8204fee9eff35517acd9c7</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-modprobe-2.0.0-1.el9.noarch.rpm">copyfail-defense-modprobe-2.0.0-1.el9.noarch.rpm</a></td>
-    <td class="sha">396af862d697221dd264ad0d8f3ac452698b50a92f53f188cf2816b5009081f7</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-shim-2.0.0-1.el9.x86_64.rpm">copyfail-defense-shim-2.0.0-1.el9.x86_64.rpm</a></td>
-    <td class="sha">eeee02be1013315155dbc83c154473da3856670b08e78ca8824610cedb48d01d</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-systemd-2.0.0-1.el9.noarch.rpm">copyfail-defense-systemd-2.0.0-1.el9.noarch.rpm</a></td>
-    <td class="sha">85dc7ed2b43002e065b3ea473d2f4bd60b8d152d347bb403e41e1f49a25f924a</td></tr>
-<tr><td><a href="repo/9/x86_64/copyfail-defense-2.0.0-1.el9.src.rpm">copyfail-defense-2.0.0-1.el9.src.rpm</a></td>
-    <td class="sha">66a0aec618cac8f84799b10e676e2590700cac8a6bc37cbf500091fb50861372</td></tr>
 </table>
 
 <h3>EL10 (RHEL 10 / CentOS Stream 10 / AlmaLinux Kitten)</h3>
@@ -744,39 +696,7 @@ across ELs.
     <td class="sha">77181ce4a65541cd6c2ecce828cef29d904e2df96d3358a9444d74e337020dff</td></tr>
 <tr><td><a href="repo/10/x86_64/copyfail-defense-2.0.2-1.el10.src.rpm">copyfail-defense-2.0.2-1.el10.src.rpm</a></td>
     <td class="sha">85d9d1485188f35a2d5d0c97a1ce6f7c029a1057a1af058fd8ad40fa9dcb7817</td></tr>
-<tr><td colspan="2" style="background:#fafafa;font-size:.85em;color:#666;padding-top:.4rem">v2.0.1-2 (retained for upgrade-cycle)</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-2.0.1-2.el10.x86_64.rpm">copyfail-defense-2.0.1-2.el10.x86_64.rpm</a></td>
-    <td class="sha">d373edb3fe1eba57d6ed519441787d43ffb9f6717c30bbc539e8cb4f22359f4f</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-auditor-2.0.1-2.el10.noarch.rpm">copyfail-defense-auditor-2.0.1-2.el10.noarch.rpm</a></td>
-    <td class="sha">7e0904a4929ec7529c0ebaac8be5ffb6635708192658a494e5c316b93615273f</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-modprobe-2.0.1-2.el10.noarch.rpm">copyfail-defense-modprobe-2.0.1-2.el10.noarch.rpm</a></td>
-    <td class="sha">e34f88954e06a4baff9fde2f5c864215b156054aa899ed8c973d3048bb17e6b1</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-shim-2.0.1-2.el10.x86_64.rpm">copyfail-defense-shim-2.0.1-2.el10.x86_64.rpm</a></td>
-    <td class="sha">87228fcd146983cc64d33dc5bae60f2265599d546ee539e237071fc50773db5f</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-systemd-2.0.1-2.el10.noarch.rpm">copyfail-defense-systemd-2.0.1-2.el10.noarch.rpm</a></td>
-    <td class="sha">58af16b50348c73f1309740c9a8b52ddd7dfeb2e7926f9d684d87b3e5375fcfa</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-2.0.1-2.el10.src.rpm">copyfail-defense-2.0.1-2.el10.src.rpm</a></td>
-    <td class="sha">6a978a03bd17f75b7e845771d78f4d94a376842e4fea10568f6e1d46db8b19c8</td></tr>
-<tr><td colspan="2" style="background:#fafafa;font-size:.85em;color:#666;padding-top:.4rem">v2.0.0 (retained for upgrade-cycle)</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-2.0.0-1.el10.x86_64.rpm">copyfail-defense-2.0.0-1.el10.x86_64.rpm</a></td>
-    <td class="sha">9bd847d2183545548f745765ac59291b1b724a178ebeb0090da3a9a133a4d4c7</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-auditor-2.0.0-1.el10.noarch.rpm">copyfail-defense-auditor-2.0.0-1.el10.noarch.rpm</a></td>
-    <td class="sha">4a7ab18217f6b11f1f968ea0b8b1755542ef9f38e1f9008561d1af63d87df6e8</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-modprobe-2.0.0-1.el10.noarch.rpm">copyfail-defense-modprobe-2.0.0-1.el10.noarch.rpm</a></td>
-    <td class="sha">fc6d69aaeae344fe67a2527eec42dec4711ef8b7841e520c9227445de97e3494</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-shim-2.0.0-1.el10.x86_64.rpm">copyfail-defense-shim-2.0.0-1.el10.x86_64.rpm</a></td>
-    <td class="sha">1e6b492dfd27e9bd795315730afee6d945e1cd9c9bea76dc8815c75847fdfbd6</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-systemd-2.0.0-1.el10.noarch.rpm">copyfail-defense-systemd-2.0.0-1.el10.noarch.rpm</a></td>
-    <td class="sha">97560d682f7089aaf6fe95ec5671a104b31f3925417683229e95a4424950cbdc</td></tr>
-<tr><td><a href="repo/10/x86_64/copyfail-defense-2.0.0-1.el10.src.rpm">copyfail-defense-2.0.0-1.el10.src.rpm</a></td>
-    <td class="sha">18e44228bdc0d3db48572714276c682d5df54095e56422c903641a6f8ca68b12</td></tr>
 </table>
-
-<p style="margin-top:1rem;color:#666;font-size:.9em">
-v1.0.1 RPMs (legacy <code>afalg-defense</code> family) are retained in
-the repo trees through the 2.0.x release line for clean
-<code>dnf upgrade</code> compatibility. Removed in v2.0.1.
-</p>
 
 <h2 id="signing">Signing</h2>
 <p>
