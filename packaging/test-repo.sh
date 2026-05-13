@@ -369,9 +369,14 @@ assert_no_scriptlet_fail /tmp/dnf.log
 old_count=$(rpm -qa | grep -c '^afalg-defense' || true)
 [ "$old_count" -eq 0 ] || fail "afalg-defense names still present: $old_count"
 
-# Assert: 5 new subpackages installed
+# Assert: all copyfail-defense subpackages installed. Count drifts
+# with each major version: v2.0.0/v2.0.1 ship 5 (meta + shim +
+# modprobe + systemd + auditor); v2.0.2+ ship 7 (+ sysctl + audit
+# via meta Recommends). Treat >=5 as "umbrella resolved" rather
+# than pin to a specific count so a future subpackage addition
+# does not regress the test bar.
 new_count=$(rpm -qa | grep -c '^copyfail-defense' || true)
-[ "$new_count" -eq 5 ] || fail "expected 5 copyfail-defense* RPMs, got $new_count"
+[ "$new_count" -ge 5 ] || fail "expected >=5 copyfail-defense* RPMs, got $new_count"
 
 # Assert: new files in expected locations
 test -f /etc/modprobe.d/99-copyfail-defense-cf1.conf \
