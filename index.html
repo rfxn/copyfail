@@ -496,20 +496,22 @@ install/upgrade and after every <code>copyfail-redetect</code> run:
 </p>
 <pre>{
   "schema_version": "2",
-  "tool_version": "2.0.1",
+  "tool_version": "2.0.2",
   "force_full": false,
   "detected": {
     "ipsec":               { "present": true,  "signals": ["systemctl: strongswan.service enabled"] },
     "afs":                 { "present": false, "signals": [] },
-    "rootless_containers": { "present": true,  "signals": ["systemctl --user (alice): podman.socket enabled"] }
+    "rootless_containers": { "present": true,  "signals": ["systemctl --user (alice): podman.socket enabled"] },
+    "userns_consumers":    { "present": true,  "signals": ["/usr/bin/firefox: desktop browser present"] }
   },
   "suppressed": {
     "modprobe_cf2_xfrm":      true,
     "modprobe_rxrpc":         false,
     "systemd_rxrpc_af":       false,
-    "systemd_userns_user_at": true
+    "systemd_userns_user_at": true,
+    "sysctl_userns":          true
   },
-  "applied": { "modprobe_cf1": true, "systemd_userns_sshd": true, "...": "..." }
+  "applied": { "modprobe_cf1": true, "systemd_userns_sshd": true, "sysctl_userns": false, "...": "..." }
 }</pre>
 <p>Other inspection paths:</p>
 <pre># Per-action log lines from %posttrans / copyfail-redetect
