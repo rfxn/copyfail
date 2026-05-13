@@ -1,0 +1,26 @@
+## /etc/audit/rules.d/99-copyfail-defense.rules
+## Owned by copyfail-defense-audit; do not hand-edit.
+##
+## Tripwire rules detecting userspace prerequisites of the Copy Fail
+## bug class (cf1 / CVE-2026-31431, cf2 / CVE-2026-43284, Dirty Frag-RxRPC
+## CVE-2026-43500, and the Fragnesia variant on the same ESP surface).
+##
+## Filters auid>=1000 + auid!=-1 to skip unattended system services;
+## unprivileged-user exploitation is the precise case these rules catch.
+##
+## Query with:
+##   ausearch -k copyfail_afalg     # cf1 socket prep
+##   ausearch -k copyfail_afkey     # cf2 / DF-ESP SA-config via legacy AF_KEY
+##   ausearch -k copyfail_afrxrpc   # DF-RxRPC socket prep
+##
+## socket() syscall: domain in arg0. AF_ALG=38, AF_KEY=15, AF_RXRPC=33.
+## ExclusiveArch is x86_64; rules cover the native ABI only. i386-compat
+## socket() rides socketcall(102) on b32 - intentionally out of scope.
+##
+## Rules are additive. Append-only -a always,exit form; safe to load
+## alongside an existing audit ruleset. The file is loaded by augenrules
+## (RHEL/Fedora) or auditctl -R (Debian).
+
+-a always,exit -F arch=b64 -S socket -F a0=38 -F auid>=1000 -F auid!=-1 -k copyfail_afalg
+-a always,exit -F arch=b64 -S socket -F a0=15 -F auid>=1000 -F auid!=-1 -k copyfail_afkey
+-a always,exit -F arch=b64 -S socket -F a0=33 -F auid>=1000 -F auid!=-1 -k copyfail_afrxrpc

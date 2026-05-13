@@ -2,7 +2,11 @@
 
 **Source:** `SPEC.md` §12 (drafted 2026-05-08; rev 2 after reviewer
 fixup pass — folds in C-1..C-8 + M-1..M-12 in-scope items).
-**Status:** rev 2 drafted, awaiting Ryan's approval + sentinel review.
+**Status:** SHIPPED 2026-05-08 — tag `v2.0.1` at commit `e16f739`,
+gh-pages live at `94dedf4`, GH release with 20 assets. All 9 phases
+complete (Phases 1-7 by engineer dispatcher in commit `25e4f58`;
+Phases 8-9 by hand with detect.sh hotfix `e16f739` for the
+`set -e + pipefail` trap caught by the staging canary).
 **Predecessor:** v2.0.0 (shipped 2026-05-08, tag `v2.0.0`, commit `f70c9eb`).
 
 This plan replaces the prior v2.0.0 PLAN. v2.0.0 is fully shipped;

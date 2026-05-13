@@ -13,8 +13,8 @@
 
 Name:           copyfail-defense
 Epoch:          1
-Version:        2.0.1
-Release:        2%{?dist}
+Version:        2.0.2
+Release:        1%{?dist}
 Summary:        Defense-in-depth toolkit for the Copy Fail bug class
 
 License:        GPLv2
@@ -34,6 +34,8 @@ Source8:        copyfail-systemd-dropin-userns.conf
 Source9:        copyfail-defense-detect.sh
 Source10:       copyfail-redetect
 Source11:       copyfail-systemd-dropin-rxrpc-af.conf
+Source12:       copyfail-sysctl-userns.conf
+Source13:       copyfail-defense-audit.rules
 
 # x86_64 only: no-afalg.c has an explicit #error for non-x86_64. The auditor
 # is portable, but the shim is a load-bearing primitive of this package
@@ -48,12 +50,18 @@ BuildRequires:  glibc-devel
 # include python3 by default - hence BuildRequires.
 BuildRequires:  python3
 
-# Meta package ties the four subpackages together. Most operators install
-# `copyfail-defense` and get all four halves.
+# Meta package ties the six subpackages together. Most operators install
+# `copyfail-defense` and get the full set (with -audit as a soft dep so
+# minimal hosts without auditd installed don't pull it in by default).
 Requires:       %{name}-shim     = %{epoch}:%{version}-%{release}
 Requires:       %{name}-modprobe = %{epoch}:%{version}-%{release}
 Requires:       %{name}-systemd  = %{epoch}:%{version}-%{release}
 Requires:       %{name}-auditor  = %{epoch}:%{version}-%{release}
+Requires:       %{name}-sysctl   = %{epoch}:%{version}-%{release}
+# Soft dep: -audit pulls auditd transitively; minimal hosts can skip it
+# via `--setopt=install_weak_deps=false` or `dnf install <subpackages>`
+# selectively.
+Recommends:     %{name}-audit    = %{epoch}:%{version}-%{release}
 
 # v2.0.0 rename: afalg-defense -> copyfail-defense. Compat retained
 # through the 2.0.x release line; dropped in 2.1.0.
@@ -63,14 +71,17 @@ Provides:       afalg-defense    = %{epoch}:%{version}-%{release}
 %description
 Defense-in-depth toolkit covering the Copy Fail bug class:
   - cf1 (CVE-2026-31431) - algif_aead AEAD scratch-write
-  - cf2 ("Electric Boogaloo") - xfrm-ESP skip_cow path
-  - Dirty Frag - xfrm-ESP and RxRPC pcbc(fcrypt) on splice'd frag
+  - cf2 (CVE-2026-43284) - xfrm-ESP skip_cow path / Dirty Frag-ESP
+  - Dirty Frag-RxRPC (CVE-2026-43500) - rxrpc pcbc(fcrypt) on splice'd frag
+  - Fragnesia (no CVE yet, same surface as CVE-2026-43284) - ESP-in-TCP
 
-This metapackage installs four subpackages:
+This metapackage installs six subpackages:
   - copyfail-defense-shim      - LD_PRELOAD AF_ALG block
   - copyfail-defense-modprobe  - kernel-module entry-point cuts
   - copyfail-defense-systemd   - per-unit RestrictAddressFamilies/Namespaces
   - copyfail-defense-auditor   - read-only host posture auditor
+  - copyfail-defense-sysctl    - host-wide unprivileged userns sysctl (v2.0.2)
+  - copyfail-defense-audit     - auditd tripwire rules (v2.0.2; soft-dep)
 
 The shim is INSTALLED but NOT enabled by this package. To enable it
 system-wide:
@@ -81,11 +92,13 @@ To disable:
 
     /usr/sbin/copyfail-shim-disable
 
-v2.0.1 auto-detects IPsec / AFS / rootless-container workloads at
-install time and suppresses the conflicting drop-ins. The detection
-report at /var/lib/copyfail-defense/auto-detect.json shows what
-ran and what was suppressed; /usr/sbin/copyfail-redetect re-runs
-detection on demand. Override the auto-detection by creating
+v2.0.1 introduced auto-detection of IPsec / AFS / rootless-container
+workloads at install time, suppressing the conflicting drop-ins.
+v2.0.2 extends auto-detection to userns consumers (Flatpak, firejail,
+desktop browsers) for the new host-wide sysctl drop-in. The detection
+report at /var/lib/copyfail-defense/auto-detect.json shows what ran
+and what was suppressed; /usr/sbin/copyfail-redetect re-runs detection
+on demand. Override the auto-detection by creating
 /etc/copyfail/force-full before install.
 
 # ---------------------------------------------------------------------------
@@ -101,8 +114,8 @@ attempt to LOG_AUTHPRIV. Intended for /etc/ld.so.preload.
 
 The shim DOES NOT prevent direct-syscall bypass (syscall(SYS_socket,
 AF_ALG, ...) or inline asm). Pair with the systemd subpackage's
-RestrictAddressFamilies=~AF_ALG ~AF_RXRPC drop-ins for kernel-enforced
-coverage, and with the kernel patch for full coverage.
+RestrictAddressFamilies=~AF_ALG ~AF_KEY ~AF_RXRPC drop-ins for
+kernel-enforced coverage, and with the kernel patch for full coverage.
 
 THIS SUBPACKAGE INSTALLS no-afalg.so BUT DOES NOT WIRE IT INTO
 /etc/ld.so.preload. To activate:
@@ -129,16 +142,30 @@ Requires:       %{name} = %{epoch}:%{version}-%{release}
 %description modprobe
 Modprobe blacklist + install-redirect for kernel modules used by the
 Copy Fail bug-class entry points:
-  - cf1 (CVE-2026-31431): algif_aead, authenc, authencesn, af_alg
-  - cf2 / Dirty Frag-ESP:  esp4, esp6, xfrm_user, xfrm_algo
-  - Dirty Frag-RxRPC:      rxrpc
+  - cf1 (CVE-2026-31431):           algif_aead, authenc, authencesn, af_alg
+  - cf2 / Dirty Frag-ESP (CVE-2026-43284):
+                                    esp4, esp6, xfrm_user, xfrm_algo
+  - Dirty Frag-RxRPC (CVE-2026-43500):
+                                    rxrpc
+  - Fragnesia (no CVE yet, same surface as CVE-2026-43284):
+                                    covered by the esp4/esp6 blacklist
 
-Drops /etc/modprobe.d/99-copyfail-defense.conf (config noreplace,
-operator-override safe).
+Drops /etc/modprobe.d/99-copyfail-defense-cf1.conf (always-on, config
+noreplace, operator-override safe) plus conditional drop files for
+cf2-xfrm and rxrpc managed by /usr/libexec/copyfail-defense/detect.sh.
+
+NOTE: on RHEL-family kernels algif_aead is built-in
+(CRYPTO_USER_API_AEAD=y), so the cf1 modprobe drop is a no-op there;
+the LD_PRELOAD shim and systemd RestrictAddressFamilies=~AF_ALG are
+the real cf1 cuts on those kernels. The supported escape is the
+kernel command line: `grubby --update-kernel ALL --args
+"initcall_blacklist=algif_aead_init"` followed by a reboot. The
+auditor reports this state under MITIGATION.
 
 WILL BREAK workloads that legitimately use IPsec (strongSwan, libreswan,
 FRRouting), AFS (openafs, kafs), or kernel crypto via AF_ALG (some QEMU
-configs, dm-crypt-via-AF_ALG userspace). Confirm posture before
+configs, dm-crypt-via-AF_ALG userspace). Auto-detection suppresses the
+conflicting drop file on detected hosts; confirm posture before
 installing on hosts that run any of these.
 
 # ---------------------------------------------------------------------------
@@ -156,15 +183,21 @@ Requires:       /usr/bin/python3
 Requires:       %{name} = %{epoch}:%{version}-%{release}
 
 %description systemd
-systemd unit drop-ins applying RestrictAddressFamilies=~AF_ALG ~AF_RXRPC,
-RestrictNamespaces=~user ~net, SystemCallFilter=~@swap, and
+systemd unit drop-ins applying RestrictAddressFamilies=~AF_ALG ~AF_KEY
+~AF_RXRPC, RestrictNamespaces=~user ~net, SystemCallFilter=~@swap, and
 SystemCallArchitectures=native to: user@.service, sshd.service,
 cron.service, crond.service, atd.service.
 
+v2.0.2 adds ~AF_KEY to RestrictAddressFamilies: the legacy PF_KEYv2
+socket is one of the two SA-config paths used by the Dirty Frag /
+Fragnesia chain (the other, XFRM netlink, still requires
+CAP_NET_ADMIN). Modern userland uses XFRM netlink; AF_KEY is legacy
+with negligible compatibility risk on the five tenant units.
+
 These cuts block the userspace prerequisites for cf2 / Dirty Frag-ESP
-(unprivileged user namespace creation) and the AF_RXRPC socket required
-by Dirty Frag-RxRPC, kernel-enforced at the unit level (uncircumventable
-from userspace).
+(unprivileged user namespace creation, AF_KEY SA install) and the
+AF_RXRPC socket required by Dirty Frag-RxRPC, kernel-enforced at the
+unit level (uncircumventable from userspace).
 
 Container-runtime drop-ins (containerd, docker, podman) are shipped
 as examples under /usr/share/doc/copyfail-defense/examples/ for
@@ -198,8 +231,9 @@ copyfail-local-check: comprehensive read-only auditor that scores the host
 across five attack-chain layers (ENV, KERNEL, MITIGATION, HARDENING,
 DETECTION) for the Copy Fail bug class:
   - cf1 (CVE-2026-31431) - algif_aead
-  - cf2 - xfrm-ESP skip_cow
-  - Dirty Frag - xfrm-ESP and RxRPC pcbc(fcrypt)
+  - cf2 (CVE-2026-43284) - xfrm-ESP skip_cow / Dirty Frag-ESP
+  - Dirty Frag-RxRPC (CVE-2026-43500) - rxrpc pcbc(fcrypt) on splice'd frag
+  - Fragnesia (no CVE yet) - ESP-in-TCP, same surface as CVE-2026-43284
 
 SAFE BY DESIGN: writes only to mkdtemp() sentinel files, never modifies
 /usr/bin or /etc, runs unprivileged (some checks degrade gracefully
@@ -209,6 +243,74 @@ sentinel file - it does not corrupt /usr/bin/su or anything else.
 JSON output (--json) is fleet-rollout friendly; consume the
 posture.verdict, posture.bug_classes_covered (array), and
 posture.bug_classes (per-class map) fields, not the human report.
+
+# ---------------------------------------------------------------------------
+%package sysctl
+Summary:        Host-wide sysctl drop-in disabling unprivileged user namespaces
+BuildArch:      noarch
+Requires:       procps-ng
+# Meta package owns detect.sh under /usr/libexec/copyfail-defense/
+# (called from this subpackage's %posttrans); hard Requires so
+# --setopt=install_weak_deps=false still pulls it.
+Requires:       %{name} = %{epoch}:%{version}-%{release}
+
+%description sysctl
+Host-wide sysctl drop-in to /etc/sysctl.d/99-copyfail-defense-userns.conf
+disabling unprivileged user-namespace creation:
+  - user.max_user_namespaces                     = 0
+  - kernel.unprivileged_userns_clone             = 0
+  - kernel.apparmor_restrict_unprivileged_userns = 1
+
+The cf2 / Dirty Frag-ESP / Fragnesia chains need CLONE_NEWUSER to
+acquire CAP_NET_ADMIN-in-namespace, which gates the xfrm SA install.
+The systemd RestrictNamespaces=~user drop-in only protects the five
+tenant units; this sysctl closes the same gap host-wide for any
+unprivileged process not started by those units.
+
+Keys are prefixed with '-' so unknown keys on a given kernel are
+silently skipped (sysctl.d(5)) - the three keys above are not all
+defined on every distro.
+
+WILL BREAK workloads that legitimately need unprivileged userns:
+rootless containers (rootless podman/buildah), Flatpak runtimes,
+firejail sandboxes, and desktop browser renderer sandboxes
+(Chromium/Chrome/Firefox). Auto-detection suppresses the drop file
+when these are present; the drop-in is removed if any of
+   - rootless container storage (existing v2.0.1 detector)
+   - Flatpak apps/runtimes
+   - firejail binary
+   - desktop browser binaries
+is detected. See /var/lib/copyfail-defense/auto-detect.json for the
+decision trace.
+
+# ---------------------------------------------------------------------------
+%package audit
+Summary:        auditd tripwire rules for cf-class userspace prep
+BuildArch:      noarch
+Requires:       audit
+
+%description audit
+auditd tripwire rules dropped to /etc/audit/rules.d/99-copyfail-defense.rules
+catching the userspace prep steps of the Copy Fail bug class:
+  - socket(AF_ALG,  ...) - cf1 (CVE-2026-31431)        - tag copyfail_afalg
+  - socket(AF_KEY,  ...) - cf2 / DF-ESP / Fragnesia    - tag copyfail_afkey
+  - socket(AF_RXRPC,...) - Dirty Frag-RxRPC (CVE-2026-43500)
+                                                       - tag copyfail_afrxrpc
+
+Filters auid>=1000 + auid!=-1 to skip unattended system services;
+unprivileged-user exploitation is the precise case these rules catch.
+
+Real value is on hosts where the modprobe blacklist is suppressed
+(IPsec / AFS workloads) and the kernel sink is intentionally
+reachable - the rules become the residual tripwire.
+
+Query examples:
+    ausearch -k copyfail_afalg     --start today
+    ausearch -k copyfail_afkey     --start today
+    ausearch -k copyfail_afrxrpc   --start today
+
+x86_64 native ABI only (b64); i386-compat socket() rides socketcall()
+on b32 and is intentionally out of scope.
 
 # ===========================================================================
 %prep
@@ -299,6 +401,21 @@ install -m 0644 %{SOURCE8} \
 install -d -m 0755 %{buildroot}%{_docdir}/%{name}/examples
 install -m 0644 %{SOURCE5} \
     %{buildroot}%{_docdir}/%{name}/examples/containers-dropin.conf
+
+# --- sysctl subpackage layout (v2.0.2) ---
+# Ships as a template under /usr/share/...; detect.sh copies to
+# /etc/sysctl.d/ in %posttrans iff no userns-consumer is detected
+# (rootless containers, Flatpak, firejail, desktop browser).
+install -d -m 0755 %{buildroot}/usr/share/copyfail-defense/conditional/sysctl
+install -m 0644 %{SOURCE12} \
+    %{buildroot}/usr/share/copyfail-defense/conditional/sysctl/99-copyfail-defense-userns.conf
+
+# --- audit subpackage layout (v2.0.2) ---
+# Rules drop directly into /etc/audit/rules.d/. Mode 0640 matches the
+# convention shipped by the audit package itself (root-only readability).
+install -d -m 0755 %{buildroot}/etc/audit/rules.d
+install -m 0640 %{SOURCE13} \
+    %{buildroot}/etc/audit/rules.d/99-copyfail-defense.rules
 
 # --- detection helper + meta layout ---
 install -d -m 0755 %{buildroot}/usr/libexec/copyfail-defense
@@ -569,13 +686,103 @@ if [ "$1" -eq 0 ]; then
 fi
 exit 0
 
+# ---------------------------------------------------------------------------
+# sysctl subpackage scriptlets (v2.0.2)
+%post sysctl
+cat <<'EOF'
+
+copyfail-defense-sysctl installed.
+
+Detection-driven activation runs in %posttrans below; the host-wide
+userns sysctl drop file lands at /etc/sysctl.d/99-copyfail-defense-userns.conf
+only if no rootless containers, Flatpak runtimes, firejail, or
+desktop browsers are present on this host.
+
+Inspect the decision:
+    sudo cat /var/lib/copyfail-defense/auto-detect.json
+
+EOF
+exit 0
+
+%posttrans sysctl -p /bin/bash
+# Detection-driven file placement first, then sysctl --system to load
+# whatever landed. detect.sh emits the same proc-sub stderr-tee idiom
+# as the modprobe/systemd %posttrans (D-55); requires -p /bin/bash.
+/usr/libexec/copyfail-defense/detect.sh apply sysctl 2> >(tee /dev/stderr \
+    | logger -t copyfail-defense -p authpriv.info 2>/dev/null) \
+    || true
+
+if [ -f /etc/sysctl.d/99-copyfail-defense-userns.conf ]; then
+    # Use -p <file> instead of --system to avoid re-applying every other
+    # sysctl.d drop-in (noisy + unrelated). The '-' prefix on our keys
+    # silences "unknown key" errors on kernels where one of the three
+    # keys is undefined (sysctl.d(5)).
+    sysctl -p /etc/sysctl.d/99-copyfail-defense-userns.conf 2>&1 \
+        | logger -t copyfail-defense -p authpriv.info 2>/dev/null \
+        || true
+fi
+exit 0
+
+%postun sysctl -p /bin/bash
+if [ "$1" -eq 0 ]; then
+    if [ -x /usr/libexec/copyfail-defense/detect.sh ]; then
+        /usr/libexec/copyfail-defense/detect.sh teardown sysctl \
+            2> >(tee /dev/stderr \
+                | logger -t copyfail-defense -p authpriv.info 2>/dev/null) \
+            || true
+    else
+        rm -f /etc/sysctl.d/99-copyfail-defense-userns.conf
+    fi
+    # Reload from the remaining sysctl.d set. user.max_user_namespaces
+    # stays at whatever value the kernel's last sysctl --system pass left
+    # it at; if no other drop-in sets it, the running-kernel value
+    # persists until reboot. Document this in the README "Remove" section.
+    sysctl --system 2>&1 \
+        | logger -t copyfail-defense -p authpriv.info 2>/dev/null \
+        || true
+fi
+exit 0
+
+# ---------------------------------------------------------------------------
+# audit subpackage scriptlets (v2.0.2)
+%posttrans audit -p /bin/bash
+# augenrules compiles /etc/audit/rules.d/*.rules to /etc/audit/audit.rules
+# and applies via auditctl. Idempotent; safe on install + upgrade.
+# On hosts without auditd running, augenrules will compile the rules
+# file but auditctl --load will fail - that's acceptable. Errors tee
+# to dnf scriptlet output per D-55.
+if command -v augenrules >/dev/null 2>&1; then
+    augenrules --load 2> >(tee /dev/stderr \
+        | logger -t copyfail-defense -p authpriv.info 2>/dev/null) \
+        | logger -t copyfail-defense -p authpriv.info 2>/dev/null \
+        || true
+fi
+exit 0
+
+%postun audit -p /bin/bash
+# On full erase, RPM has already removed /etc/audit/rules.d/99-copyfail-defense.rules
+# by the time this scriptlet fires - reload augenrules so the running
+# auditd no longer carries our keys.
+if [ "$1" -eq 0 ]; then
+    if command -v augenrules >/dev/null 2>&1; then
+        augenrules --load 2> >(tee /dev/stderr \
+            | logger -t copyfail-defense -p authpriv.info 2>/dev/null) \
+            | logger -t copyfail-defense -p authpriv.info 2>/dev/null \
+            || true
+    fi
+fi
+exit 0
+
 %postun
-# Meta package %postun: remove auto-detect.json when both -modprobe
-# and -systemd are gone. rpm -q returncodes (D-45 / M-9) determine
-# subpackage presence, not file existence.
+# Meta package %postun: remove auto-detect.json when all three
+# detection-managed subpackages (-modprobe, -systemd, -sysctl) are
+# gone. -audit is unconditional and does not consume the detect.sh
+# state file. rpm -q returncodes (D-45 / M-9) determine subpackage
+# presence, not file existence.
 if [ "$1" -eq 0 ]; then
     if ! rpm -q copyfail-defense-modprobe >/dev/null 2>&1 && \
-       ! rpm -q copyfail-defense-systemd >/dev/null 2>&1; then
+       ! rpm -q copyfail-defense-systemd  >/dev/null 2>&1 && \
+       ! rpm -q copyfail-defense-sysctl   >/dev/null 2>&1; then
         rm -f /var/lib/copyfail-defense/auto-detect.json
     fi
 fi
@@ -657,8 +864,88 @@ exit 0
 %doc README.md
 %{_sbindir}/copyfail-local-check
 
+%files sysctl
+%license LICENSE
+%doc README.md
+# Conditional sysctl drop-in template - copied to /etc/sysctl.d/ by
+# %posttrans detect.sh per /var/lib/copyfail-defense/auto-detect.json
+# (suppressed when rootless containers, Flatpak, firejail, or a
+# desktop browser is detected on the host).
+%dir /usr/share/copyfail-defense/conditional/sysctl
+/usr/share/copyfail-defense/conditional/sysctl/99-copyfail-defense-userns.conf
+
+%files audit
+%license LICENSE
+%doc README.md
+# auditd rules drop directly to /etc/audit/rules.d/. Marked
+# %config(noreplace) so an operator hand-edit survives upgrade
+# (the rule set is small and well-defined; if you have a tuned
+# set, you want yours preserved).
+%dir /etc/audit/rules.d
+%config(noreplace) %attr(0640, root, root) /etc/audit/rules.d/99-copyfail-defense.rules
+
 # ===========================================================================
 %changelog
+* Wed May 13 2026 rfxn.com <proj@rfxn.com> - 1:2.0.2-1
+- v2.0.2 broadens cf2 / Dirty Frag / Fragnesia coverage along three
+  axes informed by the Fragnesia advisory and the Red Hat / AWS /
+  Wiz / Sysdig mitigation guidance published the week of 2026-05-08.
+- New subpackage copyfail-defense-sysctl: ships a host-wide sysctl
+  drop-in at /etc/sysctl.d/99-copyfail-defense-userns.conf that
+  disables unprivileged user-namespace creation
+  (user.max_user_namespaces=0, kernel.unprivileged_userns_clone=0,
+  kernel.apparmor_restrict_unprivileged_userns=1). Keys are
+  '-'-prefixed so unknown keys on a given kernel are silently
+  skipped (sysctl.d(5)). Closes the CLONE_NEWUSER prerequisite that
+  the cf2 / DF-ESP / Fragnesia chain needs for
+  CAP_NET_ADMIN-in-namespace and the subsequent xfrm SA install,
+  on processes NOT covered by the per-tenant-unit systemd
+  RestrictNamespaces drop-in (a shell-user running an exploit
+  binary).
+- detect.sh extends with detect_userns_consumers() that flags
+  Flatpak (system+user installs), firejail, and desktop browsers
+  (Chromium/Chrome/Firefox). The sysctl drop-in is suppressed when
+  EITHER the existing rootless-container signal OR the new
+  userns-consumer signal fires. Per-unit systemd RestrictNamespaces
+  is unaffected - still applies to all five tenant units regardless
+  of userns-consumer detection. New `apply sysctl` and `teardown
+  sysctl` scopes (plus `all` covering modprobe+systemd+sysctl).
+  TOOL_VERSION bumped 2.0.1 -> 2.0.2.
+- New subpackage copyfail-defense-audit (Requires: audit, Recommends
+  from meta so minimal hosts can skip the auditd pull-in): ships
+  /etc/audit/rules.d/99-copyfail-defense.rules with three -k-tagged
+  rules detecting socket(AF_ALG/AF_KEY/AF_RXRPC) syscalls from
+  unprivileged users (auid>=1000 + auid!=-1). Real value is on hosts
+  where modprobe blacklist is suppressed by auto-detection
+  (IPsec / AFS workloads) and the kernel sink is intentionally
+  reachable - the rules become the residual tripwire. Query via
+  `ausearch -k copyfail_afalg` / `copyfail_afkey` /
+  `copyfail_afrxrpc`. x86_64 native ABI only (b64); i386-compat
+  socketcall is intentionally out of scope.
+- systemd drop-in 10-copyfail-defense.conf adds ~AF_KEY to
+  RestrictAddressFamilies, closing the legacy PF_KEYv2 SA-config
+  path used by the Dirty Frag / Fragnesia chain (the other,
+  XFRM netlink, still requires CAP_NET_ADMIN). Modern userland
+  uses XFRM netlink; AF_KEY is legacy with negligible
+  compatibility risk on the five tenant units. Same change
+  applied to the containers-dropin.conf example.
+- auto-detect.json schema: backward-compatible additions of
+  detected.userns_consumers (present + signals array),
+  suppressed.sysctl_userns, applied.sysctl_userns. schema_version
+  stays at "2" - consumers ignore unknown keys.
+- %description modprobe now documents the RHEL builtin case
+  (CRYPTO_USER_API_AEAD=y makes the cf1 modprobe drop a no-op) and
+  the supported workaround: `grubby --update-kernel ALL --args
+  "initcall_blacklist=algif_aead_init"` followed by reboot. The
+  cf1 modprobe drop-in itself is unchanged from v2.0.1; this is
+  documentation only.
+- CVE cross-stamping in subpackage %descriptions:
+  cf2 / Dirty Frag-ESP = CVE-2026-43284,
+  Dirty Frag-RxRPC = CVE-2026-43500,
+  Fragnesia = no CVE yet (same surface as CVE-2026-43284, per Wiz
+  and oss-sec disclosure). Previously only CVE-2026-31431 (cf1)
+  was pinned inline.
+
 * Fri May 08 2026 rfxn.com <proj@rfxn.com> - 1:2.0.1-2
 - 2.0.1-2 packaging hotfix (no functional change): declare
   `-p /bin/bash` on the four scriptlets that use bash process

@@ -9,8 +9,9 @@ Covers three live LPE chains that share the same `splice()` →
 | | CVE | Sink | Primitive |
 |---|---|---|---|
 | **cf1** | CVE-2026-31431 | `algif_aead` AEAD scratch-write | 4-byte STORE via `seqno_lo` |
-| **cf2** | (no CVE yet) | `esp_input` skip_cow | 4-byte STORE via `seq_hi` |
-| **Dirty Frag** | (embargo broken, no CVE) | `esp_input` + `rxkad_verify_packet_1` | 4-byte and 8-byte STORE |
+| **cf2 / Dirty Frag-ESP** | CVE-2026-43284 | `esp_input` skip_cow | 4-byte STORE via `seq_hi` |
+| **Dirty Frag-RxRPC** | CVE-2026-43500 | `rxkad_verify_packet_1` | 4-byte and 8-byte STORE |
+| **Fragnesia** | (no CVE yet — same surface as CVE-2026-43284) | `espintcp` ULP after splice | byte STORE in cached page |
 
 Userspace primitives stack into a single `dnf install`: an `LD_PRELOAD`
 shim, a kernel-module-entry-point cut, kernel-enforced systemd
@@ -33,10 +34,12 @@ per-class coverage. Signed RPMs for EL8 / EL9 / EL10.
 ---
 
 > [!NOTE]
-> Upgrading from `afalg-defense` v1.0.x or `copyfail-defense` v2.0.0 is a single
-> command: `dnf upgrade copyfail-defense`. The v2.0.0 -> v2.0.1 path
-> auto-suppresses any conflicting drop-ins detected on your host
-> (see Auto-detection below).
+> Upgrading from `afalg-defense` v1.0.x or any `copyfail-defense`
+> 2.0.x release is a single command: `dnf upgrade copyfail-defense`.
+> Auto-detection re-runs on every upgrade and suppresses any
+> conflicting drop-ins detected on your host (IPsec, AFS, rootless
+> containers, Flatpak, firejail, desktop browsers; see Auto-detection
+> below).
 
 ---
 
@@ -56,14 +59,17 @@ the public key on first use. Cross-check the fingerprint when prompted:
 6001 1CDC EA2F F52D 975A  FDEE 6D30 F32C D5E8 0F80
 ```
 
-The meta package pulls four subpackages:
+The meta package pulls six subpackages (with `-audit` as a soft dep so
+minimal hosts without auditd skip the pull-in):
 
 | Subpackage | Coverage |
 |---|---|
 | `copyfail-defense-shim` | LD_PRELOAD AF_ALG block (cf1 primary) |
 | `copyfail-defense-modprobe` | kernel-module entry-point cuts (cf1 + cf2 + Dirty Frag) |
-| `copyfail-defense-systemd` | per-unit `RestrictAddressFamilies=~AF_ALG ~AF_RXRPC` + `RestrictNamespaces=~user ~net` (all three classes) |
+| `copyfail-defense-systemd` | per-unit `RestrictAddressFamilies=~AF_ALG ~AF_KEY ~AF_RXRPC` + `RestrictNamespaces=~user ~net` (all bug classes) |
+| `copyfail-defense-sysctl` *(v2.0.2)* | host-wide `user.max_user_namespaces=0` sysctl (cf2 / DF-ESP / Fragnesia) |
 | `copyfail-defense-auditor` | read-only host posture auditor with per-class coverage report |
+| `copyfail-defense-audit` *(v2.0.2, soft-dep)* | auditd tripwire rules for `socket(AF_ALG/AF_KEY/AF_RXRPC)` syscalls |
 
 Auditor only (no `LD_PRELOAD`, for hot infrastructure):
 
@@ -148,30 +154,43 @@ hardening (suid lockdown, auditd rules) is in its own table below
 because no subpackage performs those actions; the auditor only
 recommends them conditionally.
 
-| Mitigation rung                                  | cf1 | cf2 | DF-ESP | DF-RxRPC |
-|---                                               |:---:|:---:|:---:   |:---:     |
-| LD_PRELOAD shim (`AF_ALG` hook)                  | ✅  |  ·  |   ·    |    ¹     |
-| modprobe `algif_aead` family                     | ²   |  ·  |   ·    |    ·     |
-| modprobe `esp4 esp6 xfrm_user xfrm_algo`         |  ·  | ✅  |  ✅    |    ·     |
-| modprobe `rxrpc`                                 |  ·  |  ·  |   ·    |   ✅     |
-| systemd `RestrictAddressFamilies=~AF_ALG`        | ✅  |  ·  |   ·    |    ·     |
-| systemd `RestrictAddressFamilies=~AF_RXRPC`      |  ·  |  ·  |   ·    |   ✅     |
-| systemd `RestrictNamespaces=~user ~net`          |  ·  | ✅  |  ✅    |    ·     |
+| Mitigation rung                                  | cf1 | cf2 | DF-ESP | DF-RxRPC | Fragnesia |
+|---                                               |:---:|:---:|:---:   |:---:     |:---:      |
+| LD_PRELOAD shim (`AF_ALG` hook)                  | ✅  |  ·  |   ·    |    ¹     |    ·      |
+| modprobe `algif_aead` family                     | ²   |  ·  |   ·    |    ·     |    ·      |
+| modprobe `esp4 esp6 xfrm_user xfrm_algo`         |  ·  | ✅  |  ✅    |    ·     |   ✅      |
+| modprobe `rxrpc`                                 |  ·  |  ·  |   ·    |   ✅     |    ·      |
+| systemd `RestrictAddressFamilies=~AF_ALG`        | ✅  |  ·  |   ·    |    ·     |    ·      |
+| systemd `RestrictAddressFamilies=~AF_KEY` *(v2.0.2)* |  ·  | ✅  |  ✅    |    ·     |   ✅      |
+| systemd `RestrictAddressFamilies=~AF_RXRPC`      |  ·  |  ·  |   ·    |   ✅     |    ·      |
+| systemd `RestrictNamespaces=~user ~net`          |  ·  | ✅  |  ✅    |    ·     |   ✅      |
+| sysctl `user.max_user_namespaces=0` *(v2.0.2)*   |  ·  | ✅  |  ✅    |    ·     |   ✅      |
+| auditd tripwire rules *(v2.0.2)*                 | ³   | ³   |  ³     |   ³      |   ³       |
 
 ¹ Catches the `cksum` step in the public DF-RxRPC PoC, not the kernel
 sink itself. Useful as defense-in-depth, not as a primary stop.
 ² No-op on RHEL stock kernels: `CRYPTO_USER_API*` is built-in, so the
 blacklist line cannot prevent load. Listed for completeness on custom
-or non-RHEL kernels where `algif_aead` ships modular.
+or non-RHEL kernels where `algif_aead` ships modular. On RHEL the
+supported workaround is `grubby --update-kernel ALL --args
+"initcall_blacklist=algif_aead_init"` + reboot; the auditor reports
+this state under MITIGATION.
+³ Detection, not mitigation — telemetry for `socket(AF_ALG/AF_KEY/AF_RXRPC)`
+syscalls from unprivileged users. Real value is on hosts where
+modprobe blacklists are auto-suppressed (IPsec / AFS workloads) and
+the kernel sink is intentionally reachable; rules become the
+residual tripwire. Query via `ausearch -k copyfail_afalg` /
+`copyfail_afkey` / `copyfail_afrxrpc`.
 
 ### Reference: kernel patches and detection signatures
 
-| Class    | Upstream patch  | Audit signature        |
-|---       |---              |---                     |
-| cf1      | `a664bf3d`      | `socket(a0=38)`        |
-| cf2      | `f4c50a4034`    | `unshare(NEWUSER)`     |
-| DF-ESP   | `f4c50a4034`    | `unshare(NEWUSER)`     |
-| DF-RxRPC | none upstream   | `add_key("rxrpc",...)` |
+| Class     | Upstream patch  | Audit signature                |
+|---        |---              |---                             |
+| cf1       | `a664bf3d`      | `socket(a0=38)` / `copyfail_afalg`   |
+| cf2       | `f4c50a4034`    | `socket(a0=15)` / `copyfail_afkey` · `unshare(NEWUSER)` |
+| DF-ESP    | `f4c50a4034`    | same as cf2                    |
+| DF-RxRPC  | none upstream   | `socket(a0=33)` / `copyfail_afrxrpc` · `add_key("rxrpc",...)` |
+| Fragnesia | netdev only (2026-05-13); not yet in stable trees | same as cf2 + `setsockopt(TCP_ULP="espintcp")` |
 
 The auditor emits a page-cache integrity probe (cached IOC) for every
 class; see `--json` `posture.bug_classes[*].kernel_sink`.
@@ -185,9 +204,9 @@ Review every line before pasting.
 | Action                                                     | Targets       | When the auditor recommends it |
 |---                                                         |---            |--- |
 | `chmod 4750 /usr/bin/su && chgrp wheel /usr/bin/su`        | cf2, DF-ESP   | Suppressed when `/etc/passwd` shows non-wheel/admin interactive users (cPanel-style tenant fleets); chmod 4750 would break their `su` workflow. |
-| `auditd` rule `cf_userns` (`unshare(CLONE_NEWUSER)`)       | cf2, DF-ESP   | Hosts where `auditd` is tuned for userns events (otherwise high alert noise). |
-| `auditd` rule `cf_addkey` (`add_key("rxrpc",...)`)         | DF-RxRPC      | Always; rxrpc keyring activity is rare enough that the false-positive rate stays low. |
-| `auditd` rule `afalg_attempt` (`socket(a0=38)`)            | cf1           | Hosts already running `auditd`; pairs with the LD_PRELOAD shim as a tripwire. |
+| `grubby --update-kernel ALL --args "initcall_blacklist=algif_aead_init"` + reboot | cf1 | RHEL kernels with `CRYPTO_USER_API_AEAD=y` (modprobe blacklist is a no-op on those); the supported escape per CIQ / Rocky Linux mitigation guidance. |
+| `auditd` rule `cf_userns` (`unshare(CLONE_NEWUSER)`)       | cf2, DF-ESP   | Hosts where `auditd` is tuned for userns events (otherwise high alert noise). Pairs with the v2.0.2 `-audit` subpackage rules. |
+| `auditd` rule `cf_addkey` (`add_key("rxrpc",...)`)         | DF-RxRPC      | Always; rxrpc keyring activity is rare enough that the false-positive rate stays low. The v2.0.2 `-audit` subpackage already installs the `socket(AF_RXRPC,...)` tripwire — `add_key` catches the next step in the chain. |
 
 > 🔬 **Full writeup:** [Copy Fail (CVE-2026-31431) on rfxn.com/research](https://www.rfxn.com/research/copyfail-cve-2026-31431)
 > covers cf1 kernel mechanics; cf2 and Dirty Frag extend the same
@@ -208,9 +227,9 @@ unchanged; the corruption lives in RAM until eviction.
 | | Kernel sink | Privilege needed | Module |
 |---|---|---|---|
 | **cf1** (CVE-2026-31431) | `algif_aead` AEAD scratch-write | none | `algif_aead` (RHEL: builtin) |
-| **cf2** ("Electric Boogaloo") | `esp_input` `skip_cow` path | `CAP_NET_ADMIN` via `unshare(NEWUSER\|NEWNET)` | `esp4`, `xfrm_user` (RHEL: modules) |
-| **Dirty Frag-ESP** | same as cf2 | same as cf2 | same as cf2 |
-| **Dirty Frag-RxRPC** | `rxkad_verify_packet_1` in-place `pcbc(fcrypt)` | **none** | `rxrpc` (Ubuntu: loaded; RHEL: not in core) |
+| **cf2 / Dirty Frag-ESP** (CVE-2026-43284) | `esp_input` `skip_cow` path | `CAP_NET_ADMIN` via `unshare(NEWUSER\|NEWNET)` + SA install via `AF_KEY` or XFRM netlink | `esp4`, `xfrm_user` (RHEL: modules) |
+| **Dirty Frag-RxRPC** (CVE-2026-43500) | `rxkad_verify_packet_1` in-place `pcbc(fcrypt)` | **none** | `rxrpc` (Ubuntu: loaded; RHEL: not in core) |
+| **Fragnesia** (no CVE yet) | `espintcp` ULP after splice into TCP receive queue | same as cf2 | same as cf2 |
 
 The same primitive shape, three different kernel sinks. Every layer in
 this toolkit is independently useful; none is a silver bullet on its own.
@@ -243,11 +262,13 @@ deploying every rung this package ships.
 
 | Package | Arch | Contents |
 |---|---|---|
-| `copyfail-defense` | x86_64 | meta, pulls all four below |
+| `copyfail-defense` | x86_64 | meta, pulls all six below (`-audit` as Recommends) |
 | `copyfail-defense-shim` | x86_64 | `/usr/lib64/no-afalg.so` + `copyfail-shim-{enable,disable}` |
-| `copyfail-defense-modprobe` | noarch | `/etc/modprobe.d/99-copyfail-defense.conf` (cf-class entry-point cuts) |
+| `copyfail-defense-modprobe` | noarch | `/etc/modprobe.d/99-copyfail-defense-{cf1,cf2-xfrm,rxrpc}.conf` (cf-class entry-point cuts) |
 | `copyfail-defense-systemd` | noarch | drop-ins for `user@`/`sshd`/`cron`/`crond`/`atd` + container-runtime examples |
+| `copyfail-defense-sysctl` *(v2.0.2)* | noarch | `/etc/sysctl.d/99-copyfail-defense-userns.conf` (host-wide userns disable, suppressed on userns-consumer hosts) |
 | `copyfail-defense-auditor` | noarch | `/usr/sbin/copyfail-local-check` (Python, stdlib-only, read-only) |
+| `copyfail-defense-audit` *(v2.0.2)* | noarch | `/etc/audit/rules.d/99-copyfail-defense.rules` (syscall tripwires for AF_ALG / AF_KEY / AF_RXRPC) |
 
 Per-EL binary RPMs are independently compiled against each
 distribution's glibc (EL8: 2.28 with split `libdl`; EL9/EL10: 2.34+
@@ -261,42 +282,151 @@ download links + sha256s:
 
 v2.0.1+ inspects the host at install time for workloads the default
 cuts would break, and **suppresses the conflicting drop-in only**
-while keeping every other layer active.
+while keeping every other layer active. The intent is "do no harm to
+running production"; nothing else relaxes.
 
-Three workload classes are detected:
+### Why each workload triggers a carve-out
 
-| Workload | Detection signals (any) | Suppresses |
+- **IPsec** — the kernel xfrm/ESP path *is* the cf2 / Dirty Frag-ESP
+  kernel sink. Blacklisting `esp4`/`esp6`/`xfrm_user`/`xfrm_algo`
+  disables IPsec tunnels entirely (no SA install, no encrypted
+  traffic). Suppression keeps the modprobe drop off and leans on
+  systemd `RestrictNamespaces=~user ~net` to block the unprivileged
+  `unshare(NEWUSER|NEWNET)` step that gates the cf2 chain.
+- **AFS** — `rxrpc` is both the DF-RxRPC kernel sink and the transport
+  AFS itself rides on; blacklisting it breaks `openafs-client`. The
+  per-unit `RestrictAddressFamilies=~AF_RXRPC` would also break AFS
+  userspace tooling (`aklog`, `kinit`-style PAGs) when invoked from
+  any of the five tenant units. Suppression drops both of those
+  layers; every other rung still applies.
+- **Rootless containers** — rootless `podman`/`buildah` needs
+  `CLONE_NEWUSER` under the calling `user@.service`. Our default
+  `RestrictNamespaces=~user ~net` on `user@.service` makes the
+  `unshare(2)` return `EPERM`, which kills every rootless container.
+  Suppression strips the userns drop-in **on `user@.service` only** —
+  `sshd`/`cron`/`crond`/`atd` retain it.
+- **Userns consumers** *(v2.0.2)* — Flatpak runtimes, firejail
+  sandboxes, and desktop browser renderer sandboxes
+  (Chromium/Chrome/Firefox) all rely on unprivileged user namespaces.
+  Our v2.0.2 host-wide sysctl drop-in
+  (`user.max_user_namespaces=0`) would break every one of them.
+  Suppression strips **only the sysctl drop-in**; the per-tenant-unit
+  `RestrictNamespaces=~user` cuts stay active. The same suppression
+  also fires on rootless-container hosts (so the host-wide sysctl and
+  the userns drop-in stay aligned).
+
+### Detection signals
+
+| Workload | Detection signals (any of) | Suppresses |
 |---|---|---|
-| **IPsec** (strongSwan, libreswan, openswan) | `systemctl is-enabled` returns enabled for strongswan/strongswan-starter/strongswan-swanctl/ipsec/libreswan/openswan/pluto; OR `/etc/ipsec.conf` has a `conn` stanza; OR non-empty `/etc/swanctl/conf.d/`, `/etc/ipsec.d/`, `/etc/strongswan/conf.d/`, `/etc/strongswan.d/` | `99-copyfail-defense-cf2-xfrm.conf` (esp4, esp6, xfrm_user, xfrm_algo blacklist) |
-| **AFS** (openafs, kafs) | `systemctl is-enabled` for openafs-client/openafs-server/kafs/afsd; OR `/etc/openafs/CellServDB` or `/etc/openafs/ThisCell` exists; OR `/etc/krb5.conf.d/openafs*` exists; OR `/proc/fs/afs/` registered | `99-copyfail-defense-rxrpc.conf` (rxrpc modprobe blacklist) AND `12-copyfail-defense-rxrpc-af.conf` (RestrictAddressFamilies=~AF_RXRPC on all 5 tenant units) - preserves AFS userspace tooling like aklog |
-| **Rootless containers** (rootless podman/buildah) | `/home/*/.local/share/containers/storage/overlay-containers/` present (rootless podman storage tree, recent mtime); OR `/var/lib/containers/storage/` non-empty with mtime <90d; OR `/run/user/<UID>/containers/` for any UID >= 1000; OR `podman.socket` enabled (system or per-user) | `15-copyfail-defense-userns.conf` on `user@.service.d` ONLY (other tenant units stay protected) |
+| **IPsec** (strongSwan, libreswan, openswan) | `systemctl is-enabled` returns enabled for strongswan/strongswan-starter/strongswan-swanctl/ipsec/libreswan/openswan/pluto; OR `/etc/ipsec.conf` has a `conn` stanza; OR non-empty `*.conf` in `/etc/swanctl/conf.d/`, `/etc/ipsec.d/`, `/etc/strongswan/conf.d/`, `/etc/strongswan.d/` | `99-copyfail-defense-cf2-xfrm.conf` (esp4, esp6, xfrm_user, xfrm_algo blacklist) |
+| **AFS** (openafs, kafs) | `systemctl is-enabled` for openafs-client/openafs-server/kafs/afsd; OR `/etc/openafs/CellServDB` or `/etc/openafs/ThisCell` exists; OR `/etc/krb5.conf.d/openafs*` present; OR `/proc/fs/afs/` registered | `99-copyfail-defense-rxrpc.conf` (rxrpc modprobe blacklist) AND `12-copyfail-defense-rxrpc-af.conf` (`RestrictAddressFamilies=~AF_RXRPC` on all 5 tenant units) |
+| **Rootless containers** (rootless podman/buildah) | `/home/*/.local/share/containers/storage/overlay-containers/` present with mtime within 180d (rootless podman storage tree); OR `/var/lib/containers/storage/` non-empty with mtime <90d; OR `/run/user/<UID>/containers/` present for any UID ≥ 1000 (live rootless tmpfs); OR `podman.socket` enabled (system-wide or any per-user instance) | `15-copyfail-defense-userns.conf` on `user@.service.d` **only** + `/etc/sysctl.d/99-copyfail-defense-userns.conf` (v2.0.2) |
+| **Userns consumers** *(v2.0.2: Flatpak, firejail, desktop browser)* | non-empty `/var/lib/flatpak/{app,runtime}` OR per-user `~/.local/share/flatpak/app` within 180d; OR `/usr/bin/firejail` installed; OR `/usr/bin/{chromium,chromium-browser,google-chrome,firefox,firefox-esr}` present | `/etc/sysctl.d/99-copyfail-defense-userns.conf` (v2.0.2 host-wide userns sysctl) **only** — per-unit `RestrictNamespaces` stays active |
 
-Note: `/etc/subuid` populated by `useradd` is NOT a rootless
-detection signal in v2.0.1 rev 2 - shadow-utils auto-populates
-subuid for every regular user regardless of container intent,
-which produced near-100% false positives on cPanel-shaped fleets.
-The detection now requires *active rootless usage* (storage tree,
-runtime tmpfs, or enabled podman.socket).
+False-positive guards baked into the detector:
 
-Detection runs in `%posttrans` after every install/upgrade and writes
-a structured report to `/var/lib/copyfail-defense/auto-detect.json`
-(schema versioned). The auditor consumes this and surfaces the
-decision under `posture.auto_detect`.
+- `/etc/subuid` populated by `useradd` is **not** a rootless signal.
+  shadow-utils auto-populates subuid for every regular user regardless
+  of container intent, which produced near-100% FPs on cPanel-shaped
+  fleets in v2.0.1 rev 1. Detection now requires *active* rootless
+  usage (storage tree, runtime tmpfs, or enabled `podman.socket`).
+- The rootful `/var/lib/containers/storage` signal is gated on
+  `mtime < 90d` so a long-purged podman install doesn't keep
+  triggering suppression.
+- The `/home` walk is bounded (`maxdepth 6`, `mtime -180`) so a
+  pathological tenant home tree can't stall `%posttrans`.
+- The `/run/user/<UID>/containers` signal requires `UID ≥ 1000` so
+  system-account artifacts under `/run/user/0` don't trip detection.
+
+### What stays protected after a suppression
+
+| Suppression triggered by | Layer dropped | Layers still active |
+|---|---|---|
+| **IPsec** | `99-cf2-xfrm.conf` modprobe blacklist | cf1 LD_PRELOAD shim · cf1 modprobe (`algif_aead` family) · `RestrictNamespaces=~user ~net` on all 5 tenant units (still blocks cf2/DF-ESP via the `unshare` gate) · `RestrictAddressFamilies=~AF_ALG ~AF_KEY ~AF_RXRPC` · `99-rxrpc.conf` blacklist · audit tripwire rules · host-wide userns sysctl (v2.0.2) |
+| **AFS** | `99-rxrpc.conf` blacklist + `12-rxrpc-af.conf` (`AF_RXRPC` restrict) on all 5 tenant units | cf1 LD_PRELOAD shim · cf1 modprobe · `99-cf2-xfrm.conf` blacklist · `RestrictNamespaces=~user ~net` on all 5 units (cf2/DF-ESP) · `RestrictAddressFamilies=~AF_ALG ~AF_KEY` · audit tripwire rules (DF-RxRPC ausearch key still emits, gated by auid≥1000) · host-wide userns sysctl |
+| **Rootless containers** | `15-userns.conf` on **`user@.service` only** + host-wide userns sysctl (v2.0.2) | All other layers; `sshd`/`cron`/`crond`/`atd` keep `RestrictNamespaces=~user ~net` (system-tier cf2/DF-ESP defense intact) · cf1 shim · all modprobe blacklists · `AF_ALG`/`AF_KEY`/`AF_RXRPC` restricts everywhere · audit tripwires |
+| **Userns consumers** *(v2.0.2: Flatpak / firejail / desktop browser)* | Host-wide userns sysctl drop-in **only** | All per-unit drop-ins · all modprobe blacklists · cf1 shim · all `RestrictAddressFamilies` cuts · audit tripwires |
+
+The cf1 shim and the auditor's tripwire layer are **never**
+suppressed by auto-detection; CVE-2026-31431 coverage is unchanged on
+every host.
+
+### Inspect the decision
+
+`%posttrans` writes a versioned JSON report. Read it any time:
+
+```sh
+sudo cat /var/lib/copyfail-defense/auto-detect.json
+```
+
+```json
+{
+  "schema_version": "2",
+  "tool_version": "2.0.2",
+  "force_full": false,
+  "detected": {
+    "ipsec":               { "present": true,  "signals": ["systemctl: strongswan.service enabled"] },
+    "afs":                 { "present": false, "signals": [] },
+    "rootless_containers": { "present": true,  "signals": ["systemctl --user (alice): podman.socket enabled"] },
+    "userns_consumers":    { "present": true,  "signals": ["/usr/bin/firefox: desktop browser present"] }
+  },
+  "suppressed": {
+    "modprobe_cf2_xfrm":      true,
+    "modprobe_rxrpc":         false,
+    "systemd_rxrpc_af":       false,
+    "systemd_userns_user_at": true,
+    "sysctl_userns":          true
+  },
+  "applied": { "modprobe_cf1": true, "systemd_userns_sshd": true, "sysctl_userns": false, "...": "..." }
+}
+```
+
+Other inspection paths:
+
+```sh
+# Per-action log lines from %posttrans / copyfail-redetect
+sudo journalctl -t copyfail-defense-detect --since today
+
+# Auditor surface (SIEM-friendly)
+sudo copyfail-local-check --json \
+  | jq '.posture.auto_detect'
+# {"available": true, "suppressed_modprobe": ["cf2_xfrm"], "suppressed_systemd": ["userns_user_at"]}
+```
+
+Detection runs in `%posttrans` after every install/upgrade and is
+re-run on demand by `copyfail-redetect`. The auditor surfaces the
+decision under `posture.auto_detect` for fleet dashboards.
 
 ### Re-detect after the host changes
 
-If you enable IPsec / AFS / rootless containers post-install:
+If you enable IPsec / AFS / rootless containers / Flatpak / firejail
+/ a desktop browser post-install:
 
 ```sh
 sudo /usr/sbin/copyfail-redetect
 sudo systemctl daemon-reload
 sudo systemctl try-reload-or-restart sshd.service
+sudo sysctl --system   # (v2.0.2) if the sysctl drop-in was added or removed
 ```
 
 The helper re-runs detection, refreshes `auto-detect.json`, and
-copies/removes the conditional drop-in files in `/etc/`. It does
-NOT auto-reload systemd - the operator decides when running
-services pick up the change.
+copies/removes the conditional drop-in files in `/etc/` (modprobe,
+systemd, **and sysctl** in v2.0.2). It does NOT auto-reload systemd
+or sysctl - the operator decides when running services pick up the
+change.
+
+**Removing the sysctl drop-in does not reset the running-kernel
+value.** `user.max_user_namespaces` stays at `0` until either another
+sysctl.d file sets it, or the host reboots. To restore the default
+without reboot:
+
+```sh
+sudo sysctl -w user.max_user_namespaces=$(zcat /proc/config.gz \
+    | grep -F CONFIG_USER_NS_DEFAULT_LIMIT \
+    | cut -d= -f2 \
+    || echo 31742)   # kernel default; 31742 on recent mainline
+```
 
 ### Force full install (skip detection)
 
@@ -388,7 +518,7 @@ Out-of-band verification of a downloaded RPM:
 ```sh
 curl -sSL https://rfxn.github.io/copyfail/RPM-GPG-KEY-copyfail \
   | sudo rpm --import /dev/stdin
-rpm -K copyfail-defense-2.0.1-1.el9.x86_64.rpm
+rpm -K copyfail-defense-2.0.2-1.el9.x86_64.rpm
 # expect: digests signatures OK
 ```
 
@@ -449,7 +579,7 @@ To rebuild the RPMs from the published SRPM (under your own signing):
 
 ```sh
 mock -r centos-stream+epel-9-x86_64 --rebuild \
-  https://github.com/rfxn/copyfail/releases/download/v2.0.1/copyfail-defense-2.0.1-1.el9.src.rpm
+  https://github.com/rfxn/copyfail/releases/download/v2.0.2/copyfail-defense-2.0.2-1.el9.src.rpm
 ```
 
 The spec lives at `packaging/copyfail-defense.spec`.
@@ -474,10 +604,18 @@ The spec lives at `packaging/copyfail-defense.spec`.
   sentinel; it will not corrupt anything you would notice. It will,
   however, briefly load `algif_aead` and friends if they aren't
   already loaded (which is the point).
-- `auditd` rules (cf_userns, cf_addkey) are **emitted by
-  `--emit-remediation`, not installed by the package**. Auditd
-  rules cause unnecessary alerting on hosts where auditd is not
-  tuned for them; operator action required.
+- **v2.0.2:** the `-audit` subpackage installs three tripwire rules
+  catching `socket(AF_ALG/AF_KEY/AF_RXRPC)` from unprivileged users
+  (filtered to `auid>=1000`); installed by default via the meta
+  `Recommends` (skip with `--setopt=install_weak_deps=false`). The
+  auditor's `--emit-remediation` still surfaces additional rules
+  (`cf_userns` for `unshare(CLONE_NEWUSER)`, `cf_addkey` for
+  `add_key("rxrpc",...)`) that are out of scope for the default
+  install because they depend on operator-tuned auditd context.
+- **v2.0.2 sysctl drop-in:** removing `-sysctl` does NOT reset
+  `user.max_user_namespaces` to the kernel default — the running
+  kernel value persists until reboot or another sysctl.d drop-in
+  overrides it. See "Re-detect after the host changes" above.
 
 ## License
 

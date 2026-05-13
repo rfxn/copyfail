@@ -1,6 +1,48 @@
 # Outstanding follow-ups
 
-Snapshot: **2026-05-08** (post v2.0.1 ship)
+Snapshot: **2026-05-13** (post v2.0.2 ship)
+
+## Shipped in v2.0.2 (2026-05-13)
+
+Three Fragnesia / Dirty Frag bug-class hardening additions landed,
+all driven by the 2026-05-08..2026-05-13 advisory wave (CloudLinux,
+Wiz, Sysdig, Red Hat RHSB-2026-003, AWS, Microsoft, Tenable):
+
+- New subpackage `copyfail-defense-sysctl` — host-wide
+  `user.max_user_namespaces=0` (+ `kernel.unprivileged_userns_clone=0`,
+  + `kernel.apparmor_restrict_unprivileged_userns=1`) drop-in to
+  `/etc/sysctl.d/99-copyfail-defense-userns.conf`. Keys are
+  `-`-prefixed so unknown keys silently skip (sysctl.d(5)). Closes
+  the userns prerequisite of the cf2 / DF-ESP / Fragnesia chain
+  host-wide, complementing the per-unit `RestrictNamespaces`. **This
+  closes the "Open for v2.1.0" item below in v2.0.2 instead of v2.1.**
+  Deviation from the original plan: meta hard-Requires `-sysctl`
+  (not opt-in-only) because auto-detection suppresses the drop file
+  on rootless containers, Flatpak, firejail, and desktop browsers —
+  the "blast radius documented loudly" requirement is satisfied by
+  detection rather than operator gating.
+- New subpackage `copyfail-defense-audit` — auditd rules at
+  `/etc/audit/rules.d/99-copyfail-defense.rules` catching
+  `socket(AF_ALG/AF_KEY/AF_RXRPC)` syscalls from `auid>=1000`.
+  Meta pulls it via `Recommends` (soft) so minimal hosts without
+  auditd skip the auditd transitive pull. Real value on hosts where
+  modprobe blacklists are auto-suppressed (IPsec/AFS workloads)
+  and the kernel sink stays reachable.
+- `RestrictAddressFamilies` extended with `~AF_KEY` on the always-on
+  10-* drop-in and the containers-dropin.conf example. Closes the
+  PF_KEYv2 SA-config path used by the Dirty Frag / Fragnesia chain
+  (XFRM netlink — the other SA-config path — still requires
+  `CAP_NET_ADMIN`, harder route).
+- detect.sh extended: `detect_userns_consumers` (Flatpak / firejail
+  / desktop browsers), new `sysctl` and `all` scopes,
+  auto-detect.json schema gets backward-compat additions
+  (`detected.userns_consumers`, `suppressed.sysctl_userns`,
+  `applied.sysctl_userns`). TOOL_VERSION bumped 2.0.1 → 2.0.2.
+- README: CVE cross-stamping (cf2 = CVE-2026-43284, DF-RxRPC =
+  CVE-2026-43500, Fragnesia surface notation). Coverage matrix
+  gets a Fragnesia column, sysctl userns row, audit tripwire row.
+  Operator-applied table gets the `initcall_blacklist=algif_aead_init`
+  + grubby + reboot row for the RHEL builtin algif_aead case.
 
 ## Documentation drift to apply elsewhere
 
@@ -137,16 +179,27 @@ were folded into the v2.0.1 ship — see SPEC §12 D-51..D-58):
 
 ## Open for v2.1.0 (after v2.0.0 lands)
 
-- [ ] Ship **`copyfail-defense-userns`** subpackage (sysctl drop
-  for `user.max_user_namespaces=0` /
-  `kernel.unprivileged_userns_clone=0`). Opt-in only — NOT pulled
-  by meta. Document blast radius (rootless podman, browser
-  sandboxes, flatpak) loudly.
+- [x] **DONE in v2.0.2 (2026-05-13)** — Shipped
+  `copyfail-defense-sysctl` subpackage with
+  `user.max_user_namespaces=0` /
+  `kernel.unprivileged_userns_clone=0` /
+  `kernel.apparmor_restrict_unprivileged_userns=1`. **Deviation:**
+  meta hard-Requires it rather than opt-in-only; auto-detection
+  suppresses the drop file on rootless containers / Flatpak /
+  firejail / desktop browsers, so "blast radius documented loudly"
+  becomes "blast radius auto-detected and avoided".
 - [ ] Drop the `Obsoletes:`/`Provides:` for `afalg-defense*`
   names from the spec. The compat chain is retained through the
   2.0.x line per **[D-21]**.
 - [ ] Cleanup: remove old `afalg-defense-1.0.1*` RPMs from the
   gh-pages repo trees (kept for one release cycle per **[D-22]**).
+- [ ] **Fragnesia CVE pin** — when the upstream CVE assignment
+  for the ESP-in-TCP variant lands, cross-stamp SPEC/README/PLAN.
+  Current state: CloudLinux blog cited "CVE-2026-46300" but Wiz,
+  Sysdig, Tenable, Red Hat, AlmaLinux, AWS, oss-sec all describe
+  Fragnesia as a follow-on bug in the CVE-2026-43284 surface with
+  no separate CVE assigned yet (as of 2026-05-13). Worth
+  re-checking the cna/Red Hat tracker monthly until pinned.
 
 ## Architecture extension (not scheduled)
 

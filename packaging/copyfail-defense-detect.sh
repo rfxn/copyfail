@@ -16,8 +16,9 @@ STATE_FILE="${STATE_DIR}/auto-detect.json"
 TEMPLATE_DIR="/usr/share/copyfail-defense/conditional"
 ETC_MODPROBE="/etc/modprobe.d"
 ETC_SYSTEMD="/etc/systemd/system"
+ETC_SYSCTL="/etc/sysctl.d"
 FORCE_FULL="/etc/copyfail/force-full"
-TOOL_VERSION="2.0.1"
+TOOL_VERSION="2.0.2"
 
 # Active tenant units (must match SPEC §4.2 and v2.0.0 CF_CLASS_TENANT_UNITS)
 TENANT_UNITS=("user@" "sshd" "cron" "crond" "atd")
@@ -168,11 +169,72 @@ detect_rootless_containers() {
     return 0
 }
 
+USERNS_CONSUMERS_PRESENT="false"
+USERNS_CONSUMERS_SIGNALS=()
+
+# v2.0.2: distinct signal set from rootless containers. Catches userns
+# consumers that the cf-class host-wide sysctl drop-in would break but
+# that don't show up in the rootless-podman detector: Flatpak runtime
+# (uses bwrap which needs CLONE_NEWUSER), firejail (explicit userns
+# sandboxer), and desktop browsers (Chromium/Chrome/Firefox use
+# unprivileged userns for their renderer sandbox on Linux).
+#
+# Triggers suppression of /etc/sysctl.d/99-copyfail-defense-userns.conf
+# only - the per-unit systemd RestrictNamespaces=~user drop-in is
+# unaffected (it scopes to the five tenant units).
+detect_userns_consumers() {
+    # Signal 1: Flatpak installed apps or runtimes (system-wide install).
+    # /var/lib/flatpak is the canonical system path; per-user installs
+    # live under /home/*/.local/share/flatpak/ - both walked here.
+    local d
+    for d in /var/lib/flatpak/app /var/lib/flatpak/runtime; do
+        if [ -d "${d}" ] && \
+           find "${d}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+               | grep -q .; then
+            USERNS_CONSUMERS_PRESENT="true"
+            USERNS_CONSUMERS_SIGNALS+=("${d}: non-empty (Flatpak install)")
+        fi
+    done
+    if find /home -maxdepth 6 -type d \
+            -path '*/.local/share/flatpak/app' \
+            -mtime -180 2>/dev/null | grep -q .; then
+        USERNS_CONSUMERS_PRESENT="true"
+        USERNS_CONSUMERS_SIGNALS+=("/home/*/.local/share/flatpak/app: per-user Flatpak install")
+    fi
+
+    # Signal 2: firejail userns sandbox installed. Unlike bubblewrap
+    # (which is a Flatpak dep on every workstation), firejail is only
+    # installed when explicitly used - presence ~= active use.
+    if [ -x /usr/bin/firejail ]; then
+        USERNS_CONSUMERS_PRESENT="true"
+        USERNS_CONSUMERS_SIGNALS+=("/usr/bin/firejail: installed")
+    fi
+
+    # Signal 3: desktop browser binaries. Chromium / Chrome / Firefox
+    # default to unprivileged-userns renderer sandbox on Linux; with
+    # user.max_user_namespaces=0 they fall back to setuid-sandbox where
+    # available, but on hosts without that helper they hard-fail.
+    # Presence on a server is unusual - if any of these exist, the host
+    # is plausibly a workstation and we should not host-wide block userns.
+    local b
+    for b in /usr/bin/chromium /usr/bin/chromium-browser \
+             /usr/bin/google-chrome /usr/bin/firefox \
+             /usr/bin/firefox-esr; do
+        if [ -x "${b}" ]; then
+            USERNS_CONSUMERS_PRESENT="true"
+            USERNS_CONSUMERS_SIGNALS+=("${b}: desktop browser present")
+            break
+        fi
+    done
+    return 0
+}
+
 # SUPPRESS_*: true if mitigation is suppressed; false if applied.
 SUPPRESS_MODPROBE_CF2_XFRM="false"
 SUPPRESS_MODPROBE_RXRPC="false"
 SUPPRESS_SYSTEMD_RXRPC_AF="false"
 SUPPRESS_SYSTEMD_USERNS_USER_AT="false"
+SUPPRESS_SYSCTL_USERNS="false"
 
 # force-full sentinel resolver: returns 0 (active) only for a regular
 # file. Logs WARN if path exists as directory, broken symlink, etc -
@@ -206,6 +268,15 @@ decide_suppressions() {
     [ "${AFS_PRESENT}" = "true" ]      && SUPPRESS_MODPROBE_RXRPC="true"
     [ "${AFS_PRESENT}" = "true" ]      && SUPPRESS_SYSTEMD_RXRPC_AF="true"
     [ "${ROOTLESS_PRESENT}" = "true" ] && SUPPRESS_SYSTEMD_USERNS_USER_AT="true"
+    # v2.0.2 sysctl userns drop-in: host-wide userns sysctl is suppressed
+    # by EITHER rootless containers (existing signal) OR Flatpak / firejail
+    # / desktop browsers (new userns-consumers signal). Per-unit systemd
+    # RestrictNamespaces is unaffected (still applies to the five tenant
+    # units regardless of userns-consumer detection).
+    if [ "${ROOTLESS_PRESENT}" = "true" ] || \
+       [ "${USERNS_CONSUMERS_PRESENT}" = "true" ]; then
+        SUPPRESS_SYSCTL_USERNS="true"
+    fi
     # Explicit success: the chained `[ x ] && SUP=...` returns 1 when
     # the final test is false (clean host, nothing detected). Under
     # the script's `set -e` that would abort main() before
@@ -293,10 +364,31 @@ apply_systemd() {
     fi
 }
 
+apply_sysctl() {
+    local src dst
+    src="${TEMPLATE_DIR}/sysctl/99-copyfail-defense-userns.conf"
+    dst="${ETC_SYSCTL}/99-copyfail-defense-userns.conf"
+    if [ ! -f "${src}" ]; then
+        # Subpackage -sysctl not installed; nothing to do.
+        return 0
+    fi
+    if [ "${SUPPRESS_SYSCTL_USERNS}" = "true" ]; then
+        rm -f "${dst}"
+        log "sysctl userns: suppressed (rootless containers or userns-consumer detected)"
+    else
+        cmp_and_install "${src}" "${dst}" "sysctl userns"
+    fi
+}
+
 teardown_modprobe() {
     rm -f "${ETC_MODPROBE}/99-copyfail-defense-cf2-xfrm.conf"
     rm -f "${ETC_MODPROBE}/99-copyfail-defense-rxrpc.conf"
     log "modprobe teardown: removed conditional /etc/modprobe.d/* files"
+}
+
+teardown_sysctl() {
+    rm -f "${ETC_SYSCTL}/99-copyfail-defense-userns.conf"
+    log "sysctl teardown: removed /etc/sysctl.d/99-copyfail-defense-userns.conf"
 }
 
 teardown_systemd() {
@@ -321,7 +413,7 @@ write_state_json() {
     # string, so an env-var carrier collapses signal1\0signal2\0 into
     # signal1signal2 - a single concatenated string. Piping printf's
     # output straight into python avoids the bash variable round-trip
-    # entirely. End-of-list markers separate the three arrays.
+    # entirely. End-of-list markers separate the four arrays.
     {
         printf '%s\0' "${IPSEC_SIGNALS[@]+${IPSEC_SIGNALS[@]}}"
         printf 'CFD_END_IPSEC\0'
@@ -329,6 +421,8 @@ write_state_json() {
         printf 'CFD_END_AFS\0'
         printf '%s\0' "${ROOTLESS_SIGNALS[@]+${ROOTLESS_SIGNALS[@]}}"
         printf 'CFD_END_ROOTLESS\0'
+        printf '%s\0' "${USERNS_CONSUMERS_SIGNALS[@]+${USERNS_CONSUMERS_SIGNALS[@]}}"
+        printf 'CFD_END_USERNS_CONSUMERS\0'
     } | env \
         CFD_TOOL_VERSION="${TOOL_VERSION}" \
         CFD_TIMESTAMP="$(date +%s)" \
@@ -337,10 +431,12 @@ write_state_json() {
         CFD_IPSEC_PRESENT="${IPSEC_PRESENT}" \
         CFD_AFS_PRESENT="${AFS_PRESENT}" \
         CFD_ROOTLESS_PRESENT="${ROOTLESS_PRESENT}" \
+        CFD_USERNS_CONSUMERS_PRESENT="${USERNS_CONSUMERS_PRESENT}" \
         CFD_SUP_MODPROBE_CF2_XFRM="${SUPPRESS_MODPROBE_CF2_XFRM}" \
         CFD_SUP_MODPROBE_RXRPC="${SUPPRESS_MODPROBE_RXRPC}" \
         CFD_SUP_SYSTEMD_RXRPC_AF="${SUPPRESS_SYSTEMD_RXRPC_AF}" \
         CFD_SUP_SYSTEMD_USERNS_USER_AT="${SUPPRESS_SYSTEMD_USERNS_USER_AT}" \
+        CFD_SUP_SYSCTL_USERNS="${SUPPRESS_SYSCTL_USERNS}" \
         python3 -c '
 import json, os, sys
 
@@ -360,14 +456,16 @@ def take_until(marker):
             out.append(item)
     return out
 
-ipsec_signals    = take_until("CFD_END_IPSEC")
-afs_signals      = take_until("CFD_END_AFS")
-rootless_signals = take_until("CFD_END_ROOTLESS")
+ipsec_signals      = take_until("CFD_END_IPSEC")
+afs_signals        = take_until("CFD_END_AFS")
+rootless_signals   = take_until("CFD_END_ROOTLESS")
+consumers_signals  = take_until("CFD_END_USERNS_CONSUMERS")
 
-sup_xfrm   = b("CFD_SUP_MODPROBE_CF2_XFRM")
-sup_rxrpc  = b("CFD_SUP_MODPROBE_RXRPC")
-sup_rxaf   = b("CFD_SUP_SYSTEMD_RXRPC_AF")
-sup_userns = b("CFD_SUP_SYSTEMD_USERNS_USER_AT")
+sup_xfrm     = b("CFD_SUP_MODPROBE_CF2_XFRM")
+sup_rxrpc    = b("CFD_SUP_MODPROBE_RXRPC")
+sup_rxaf     = b("CFD_SUP_SYSTEMD_RXRPC_AF")
+sup_userns   = b("CFD_SUP_SYSTEMD_USERNS_USER_AT")
+sup_sysctl   = b("CFD_SUP_SYSCTL_USERNS")
 
 doc = {
     "schema_version": "2",
@@ -377,15 +475,17 @@ doc = {
     "hostname": os.environ["CFD_HOSTNAME"],
     "force_full": b("CFD_FORCE_FULL"),
     "detected": {
-        "ipsec":               {"present": b("CFD_IPSEC_PRESENT"),    "signals": ipsec_signals},
-        "afs":                 {"present": b("CFD_AFS_PRESENT"),      "signals": afs_signals},
-        "rootless_containers": {"present": b("CFD_ROOTLESS_PRESENT"), "signals": rootless_signals},
+        "ipsec":               {"present": b("CFD_IPSEC_PRESENT"),             "signals": ipsec_signals},
+        "afs":                 {"present": b("CFD_AFS_PRESENT"),               "signals": afs_signals},
+        "rootless_containers": {"present": b("CFD_ROOTLESS_PRESENT"),          "signals": rootless_signals},
+        "userns_consumers":    {"present": b("CFD_USERNS_CONSUMERS_PRESENT"),  "signals": consumers_signals},
     },
     "suppressed": {
         "modprobe_cf2_xfrm":      sup_xfrm,
         "modprobe_rxrpc":         sup_rxrpc,
         "systemd_rxrpc_af":       sup_rxaf,
         "systemd_userns_user_at": sup_userns,
+        "sysctl_userns":          sup_sysctl,
     },
     "applied": {
         "modprobe_cf1":              True,
@@ -402,6 +502,7 @@ doc = {
         "systemd_userns_cron":       True,
         "systemd_userns_crond":      True,
         "systemd_userns_atd":        True,
+        "sysctl_userns":             not sup_sysctl,
     },
 }
 with open(sys.argv[1], "w") as f:
@@ -414,8 +515,10 @@ with open(sys.argv[1], "w") as f:
 
 usage() {
     cat <<USAGE >&2
-USAGE: $0 apply (modprobe|systemd|both)
-       $0 teardown (modprobe|systemd|both)
+USAGE: $0 apply (modprobe|systemd|sysctl|both|all)
+       $0 teardown (modprobe|systemd|sysctl|both|all)
+       'both' = modprobe+systemd (back-compat with v2.0.1 callers).
+       'all'  = modprobe+systemd+sysctl.
 USAGE
     exit 1
 }
@@ -425,32 +528,39 @@ main() {
     case "${action}" in
         apply)
             case "${scope}" in
-                modprobe|systemd|both) ;;
+                modprobe|systemd|sysctl|both|all) ;;
                 *) usage ;;
             esac
             detect_ipsec
             detect_afs
             detect_rootless_containers
+            detect_userns_consumers
             decide_suppressions
-            if [ "${scope}" = "modprobe" ] || [ "${scope}" = "both" ]; then
+            if [ "${scope}" = "modprobe" ] || [ "${scope}" = "both" ] || [ "${scope}" = "all" ]; then
                 apply_modprobe
             fi
-            if [ "${scope}" = "systemd" ] || [ "${scope}" = "both" ]; then
+            if [ "${scope}" = "systemd" ] || [ "${scope}" = "both" ] || [ "${scope}" = "all" ]; then
                 apply_systemd
             fi
+            if [ "${scope}" = "sysctl" ] || [ "${scope}" = "all" ]; then
+                apply_sysctl
+            fi
             write_state_json "${STATE_FILE}"
-            log "apply ${scope} complete: ipsec=${IPSEC_PRESENT} afs=${AFS_PRESENT} rootless=${ROOTLESS_PRESENT}"
+            log "apply ${scope} complete: ipsec=${IPSEC_PRESENT} afs=${AFS_PRESENT} rootless=${ROOTLESS_PRESENT} userns_consumers=${USERNS_CONSUMERS_PRESENT}"
             ;;
         teardown)
             case "${scope}" in
-                modprobe|systemd|both) ;;
+                modprobe|systemd|sysctl|both|all) ;;
                 *) usage ;;
             esac
-            if [ "${scope}" = "modprobe" ] || [ "${scope}" = "both" ]; then
+            if [ "${scope}" = "modprobe" ] || [ "${scope}" = "both" ] || [ "${scope}" = "all" ]; then
                 teardown_modprobe
             fi
-            if [ "${scope}" = "systemd" ] || [ "${scope}" = "both" ]; then
+            if [ "${scope}" = "systemd" ] || [ "${scope}" = "both" ] || [ "${scope}" = "all" ]; then
                 teardown_systemd
+            fi
+            if [ "${scope}" = "sysctl" ] || [ "${scope}" = "all" ]; then
+                teardown_sysctl
             fi
             ;;
         *)
